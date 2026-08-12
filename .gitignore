@@ -1,0 +1,33 @@
+# Binaries
+wave
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Go dependencies
+vendor/
+go.sum
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project artifacts
+*.yaml.bak
+*.json.bak
+*.log
+
+# Build artifacts
+/target
+/build
+
+# Environment files
+.env
+.env.local
