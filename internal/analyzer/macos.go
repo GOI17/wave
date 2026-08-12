@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"wave/internal/models"
 )
 
 // macOSAnalyzer implements Analyzer for macOS
