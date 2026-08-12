@@ -1,15 +1,14 @@
 # Binaries
-wave
 *.exe
 *.dll
 *.so
 *.dylib
 bin/
 dist/
+/wave
 
 # Go dependencies
 vendor/
-go.sum
 
 # IDEs
 .vscode/
