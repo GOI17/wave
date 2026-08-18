@@ -73,7 +73,7 @@ func (m *Migrator) Apply(inputPath string, dryRun bool, format string) error {
 	}
 
 	// Validate state
-	if err := m.executor.ValidateState(state); err != nil {
+	if err := m.executor.ValidateState(state, dryRun); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 

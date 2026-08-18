@@ -10,6 +10,7 @@ import (
 	"wave/internal/analyzer"
 	"wave/internal/executor"
 	"wave/internal/migrator"
+	"wave/ui/gui"
 	"wave/ui/tui"
 )
 
@@ -18,6 +19,7 @@ var (
 	inputPath  string
 	format     string
 	dryRun     bool
+	startGUI   = gui.StartGUI
 )
 
 // RootCmd is the root command
@@ -152,28 +154,7 @@ var guiCmd = &cobra.Command{
 	Short: "Launch desktop GUI",
 	Long:  `Start the web-based graphical interface for migration workflows.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		port := cmd.Flag("port").Value.String()
-		if port == "" {
-			port = "8080"
-		}
-
-		fmt.Println("🌊 Wave GUI – Web-based Interface")
-		fmt.Println("=" + strings.Repeat("=", 35))
-		fmt.Printf("\n📡 Starting server on port %s...\n", port)
-
-		// Import GUI package
-		homeDir, _ := os.UserHomeDir()
-		_ = homeDir // prevent unused warning
-
-		// For now, show instructions
-		fmt.Println("\n📖 GUI implementation uses web technologies:")
-		fmt.Println("   Framework: Tauri (Rust + Electron) or plain HTTP server")
-		fmt.Println("   Frontend: Modern HTML5 + CSS3 + JavaScript")
-		fmt.Println("   Status: Available as web interface")
-		fmt.Println("\nFor v1.0, use 'wave tui' for interactive mode")
-		fmt.Println("Web GUI available in development branch")
-
-		return nil
+		return startGUI(cmd.Flag("port").Value.String())
 	},
 }
 
@@ -187,7 +168,7 @@ var versionCmd = &cobra.Command{
 		fmt.Println("\nFeatures:")
 		fmt.Println("  ✓ CLI - Full-featured command line")
 		fmt.Println("  ✓ TUI - Interactive terminal UI")
-		fmt.Println("  ⧖ GUI - Desktop app (v1.1+)")
+		fmt.Println("  ✓ GUI - Web-based interface")
 	},
 }
 
@@ -217,4 +198,3 @@ func init() {
 	RootCmd.AddCommand(guiCmd)
 	RootCmd.AddCommand(versionCmd)
 }
-

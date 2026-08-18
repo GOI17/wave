@@ -186,14 +186,14 @@ func TestExecutorValidation(t *testing.T) {
 	e := executor.NewMacOSExecutor(homeDir, true)
 
 	// Nil state
-	err := e.ValidateState(nil)
+	err := e.ValidateState(nil, true)
 	if err == nil {
 		t.Error("Expected error for nil state")
 	}
 
 	// Empty state
 	emptyState := &models.MigrationState{}
-	err = e.ValidateState(emptyState)
+	err = e.ValidateState(emptyState, true)
 	if err == nil {
 		t.Error("Expected error for empty version")
 	}
@@ -202,7 +202,7 @@ func TestExecutorValidation(t *testing.T) {
 	validState := &models.MigrationState{
 		Version: "1.0.0",
 	}
-	err = e.ValidateState(validState)
+	err = e.ValidateState(validState, true)
 	if err != nil {
 		t.Logf("✓ State validation working: %v", err)
 	}

@@ -1,0 +1,84 @@
+package tui
+
+import (
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func TestModelRunsSelectedAction(t *testing.T) {
+	tests := []struct {
+		name   string
+		cursor int
+		want   cmdType
+	}{
+		{name: "capture", cursor: 0, want: captureCmd},
+		{name: "apply", cursor: 1, want: applyCmd},
+		{name: "view", cursor: 2, want: viewCmd},
+		{name: "verify", cursor: 3, want: verifyCmd},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := InitialModel()
+			model.cursor = tt.cursor
+			model.run = func(cmd cmdType) tea.Cmd {
+				if cmd != tt.want {
+					t.Fatalf("run command = %q, want %q", cmd, tt.want)
+				}
+				return commandResult(cmd, nil)
+			}
+
+			updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if command == nil {
+				t.Fatal("selection returned no command")
+			}
+
+			updated, _ = updated.(Model).Update(command())
+			if !strings.Contains(updated.(Model).status, "completed") {
+				t.Fatalf("status = %q, want completed status", updated.(Model).status)
+			}
+		})
+	}
+}
+
+func TestModelShowsCommandError(t *testing.T) {
+	model := InitialModel()
+	model.run = func(cmd cmdType) tea.Cmd {
+		return commandResult(cmd, errors.New("boom"))
+	}
+
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = updated.(Model).Update(command())
+	if !strings.Contains(updated.(Model).status, "boom") {
+		t.Fatalf("status = %q, want command error", updated.(Model).status)
+	}
+}
+
+func TestCommandFor(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  cmdType
+		want []string
+	}{
+		{name: "capture", cmd: captureCmd, want: []string{"/tmp/wave", "capture", "--output", "/tmp/state.yaml"}},
+		{name: "apply", cmd: applyCmd, want: []string{"/tmp/wave", "apply", "--input", "/tmp/state.yaml", "--dry-run"}},
+		{name: "view", cmd: viewCmd, want: []string{"/usr/bin/less", "/tmp/state.yaml"}},
+		{name: "verify", cmd: verifyCmd, want: []string{"/tmp/wave", "verify", "--input", "/tmp/state.yaml"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command, err := commandFor(tt.cmd, "/tmp/wave", "/tmp/state.yaml")
+			if err != nil {
+				t.Fatalf("commandFor() error = %v", err)
+			}
+			if !reflect.DeepEqual(command.Args, tt.want) {
+				t.Fatalf("command args = %#v, want %#v", command.Args, tt.want)
+			}
+		})
+	}
+}

@@ -1,10 +1,18 @@
 package gui
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 
 	"wave/internal/analyzer"
 	"wave/internal/executor"
@@ -13,37 +21,101 @@ import (
 
 // Server represents the GUI web server
 type Server struct {
-	port string
-	mux  *http.ServeMux
+	port        string
+	mux         *http.ServeMux
+	operationMu sync.Mutex
 }
 
 // NewServer creates a new GUI server
 func NewServer(port string) *Server {
-	return &Server{
+	server := &Server{
 		port: port,
 		mux:  http.NewServeMux(),
 	}
+	server.setupRoutes()
+	return server
 }
 
 // Start starts the GUI server
 func (s *Server) Start() error {
-	s.setupRoutes()
+	listener, err := net.Listen("tcp", "127.0.0.1:"+s.port)
+	if err != nil {
+		return fmt.Errorf("start GUI server: %w", err)
+	}
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	url := fmt.Sprintf("http://localhost:%d", port)
 
 	fmt.Printf("🌊 Wave GUI Server\n")
-	fmt.Printf("📡 Listening on: http://localhost:%s\n", s.port)
-	fmt.Printf("\nOpen in browser: http://localhost:%s\n", s.port)
+	fmt.Printf("📡 Listening on: %s\n", url)
+	if err := openBrowser(url); err != nil {
+		fmt.Printf("⚠ Could not open the browser: %v\n", err)
+		fmt.Printf("Open manually: %s\n", url)
+	}
 	fmt.Println("\nPress Ctrl+C to stop")
 
-	return http.ListenAndServe(":"+s.port, s.mux)
+	server := &http.Server{
+		Handler:           s.mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return server.Serve(listener)
+}
+
+func openBrowser(url string) error {
+	return exec.Command("/usr/bin/open", url).Run()
 }
 
 // setupRoutes sets up HTTP routes
 func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/", s.indexHandler)
-	s.mux.HandleFunc("/api/capture", s.captureHandler)
-	s.mux.HandleFunc("/api/apply", s.applyHandler)
-	s.mux.HandleFunc("/api/status", s.statusHandler)
-	s.mux.HandleFunc("/api/state", s.stateHandler)
+	s.mux.Handle("/api/capture", s.localOnly(s.exclusive(http.HandlerFunc(s.captureHandler))))
+	s.mux.Handle("/api/apply", s.localOnly(s.exclusive(http.HandlerFunc(s.applyHandler))))
+	s.mux.Handle("/api/status", s.localOnly(http.HandlerFunc(s.statusHandler)))
+	s.mux.Handle("/api/state", s.localOnly(http.HandlerFunc(s.stateHandler)))
+}
+
+func (s *Server) localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			parsed, err := url.Parse(origin)
+			if err != nil || !isLoopbackHost(parsed.Host) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if parsedHost, _, err := net.SplitHostPort(hostport); err == nil {
+		host = parsedHost
+	}
+	return strings.EqualFold(host, "localhost") || net.ParseIP(host).IsLoopback()
+}
+
+func (s *Server) exclusive(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.operationMu.TryLock() {
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "another migration operation is running"})
+			return
+		}
+		defer s.operationMu.Unlock()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 // indexHandler serves the web UI
@@ -69,15 +141,11 @@ func (s *Server) captureHandler(w http.ResponseWriter, r *http.Request) {
 	mig := migrator.NewMigrator(analyzer, executor)
 
 	if err := mig.Capture(outputPath, "yaml"); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `{"success":false,"error":"%v"}`, err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"success":true,"file":"%s"}`, outputPath)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "file": outputPath})
 }
 
 // applyHandler applies captured state
@@ -87,31 +155,80 @@ func (s *Server) applyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inputPath := r.FormValue("file")
-	dryRun := r.FormValue("dry-run") == "true"
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	inputPath, format, cleanup, err := saveUploadedState(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	defer cleanup()
+
+	if r.FormValue("dry-run") != "true" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "GUI migrations require dry-run mode"})
+		return
+	}
+	dryRun := true
 
 	homeDir, _ := os.UserHomeDir()
 	analyzer := analyzer.NewMacOSAnalyzer(homeDir)
 	executor := executor.NewMacOSExecutor(homeDir, dryRun)
 	mig := migrator.NewMigrator(analyzer, executor)
 
-	if err := mig.Apply(inputPath, dryRun, "yaml"); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `{"success":false,"error":"%v"}`, err)
+	if err := mig.Apply(inputPath, dryRun, format); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, `{"success":true}`)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func saveUploadedState(r *http.Request) (string, string, func(), error) {
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		return "", "", func() {}, fmt.Errorf("read state file: %w", err)
+	}
+	defer file.Close()
+	removeMultipartFiles := func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}
+
+	format := strings.TrimPrefix(strings.ToLower(filepath.Ext(header.Filename)), ".")
+	if format == "yml" {
+		format = "yaml"
+	}
+	if format != "yaml" && format != "json" {
+		removeMultipartFiles()
+		return "", "", func() {}, fmt.Errorf("state file must be YAML or JSON")
+	}
+
+	tempFile, err := os.CreateTemp("", "wave-state-*")
+	if err != nil {
+		removeMultipartFiles()
+		return "", "", func() {}, fmt.Errorf("create temporary state file: %w", err)
+	}
+
+	cleanup := func() {
+		_ = os.Remove(tempFile.Name())
+		removeMultipartFiles()
+	}
+	if _, err := io.Copy(tempFile, file); err != nil {
+		_ = tempFile.Close()
+		cleanup()
+		return "", "", func() {}, fmt.Errorf("save state file: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		cleanup()
+		return "", "", func() {}, fmt.Errorf("close state file: %w", err)
+	}
+
+	return tempFile.Name(), format, cleanup, nil
 }
 
 // statusHandler returns server status
 func (s *Server) statusHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, `{"status":"ok","version":"1.0.0"}`)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "1.0.0"})
 }
 
 // stateHandler serves captured state
@@ -253,7 +370,7 @@ func getIndexHTML() string {
         }
 
         .loading {
-            display: none;
+            display: block;
             text-align: center;
             padding: 20px;
         }
@@ -349,9 +466,9 @@ func getIndexHTML() string {
 
         <div class="content">
             <div class="tabs">
-                <button class="tab active" onclick="switchTab('capture')">📦 Capture</button>
-                <button class="tab" onclick="switchTab('apply')">⚡ Apply</button>
-                <button class="tab" onclick="switchTab('info')">ℹ️ Info</button>
+                <button class="tab active" onclick="switchTab(this, 'capture')">📦 Capture</button>
+                <button class="tab" onclick="switchTab(this, 'apply')">⚡ Apply</button>
+                <button class="tab" onclick="switchTab(this, 'info')">ℹ️ Info</button>
             </div>
 
             <!-- Capture Tab -->
@@ -373,10 +490,10 @@ func getIndexHTML() string {
                         <input type="file" id="state-file" accept=".yaml,.yml,.json">
                     </div>
                     <div class="checkbox">
-                        <input type="checkbox" id="dry-run" checked>
-                        <label for="dry-run">Dry-run (preview changes)</label>
+                        <input type="checkbox" id="dry-run" checked disabled>
+                        <label for="dry-run">Dry-run required (preview only)</label>
                     </div>
-                    <button class="button" onclick="applyState()">Apply Migration</button>
+                    <button class="button" onclick="applyState()">Preview Migration</button>
                     <div id="apply-status"></div>
                 </div>
             </div>
@@ -410,7 +527,7 @@ func getIndexHTML() string {
     </div>
 
     <script>
-        function switchTab(tabName) {
+        function switchTab(button, tabName) {
             // Hide all tabs
             const contents = document.querySelectorAll('.tab-content');
             contents.forEach(c => c.classList.remove('active'));
@@ -421,16 +538,20 @@ func getIndexHTML() string {
 
             // Show selected tab
             document.getElementById(tabName).classList.add('active');
-            event.target.classList.add('active');
+            button.classList.add('active');
         }
 
         function showStatus(elementId, message, type) {
             const elem = document.getElementById(elementId);
-            elem.innerHTML = '<div class="status ' + type + '">' + message + '</div>';
+            elem.replaceChildren();
+            const status = document.createElement('div');
+            status.className = 'status ' + type;
+            status.textContent = message;
+            elem.appendChild(status);
         }
 
         function captureState() {
-            showStatus('capture-status', '<div class="loading"><div class="spinner"></div>Capturing device state...</div>', 'info');
+            showStatus('capture-status', 'Capturing device state...', 'info');
 
             fetch('/api/capture', { method: 'POST' })
                 .then(r => r.json())
@@ -453,7 +574,7 @@ func getIndexHTML() string {
                 return;
             }
 
-            showStatus('apply-status', '<div class="loading"><div class="spinner"></div>Applying migration...</div>', 'info');
+            showStatus('apply-status', 'Applying migration preview...', 'info');
 
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
@@ -463,7 +584,7 @@ func getIndexHTML() string {
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        showStatus('apply-status', '✅ Migration applied successfully!', 'success');
+                        showStatus('apply-status', '✅ Migration preview completed!', 'success');
                     } else {
                         showStatus('apply-status', '❌ Error: ' + data.error, 'error');
                     }

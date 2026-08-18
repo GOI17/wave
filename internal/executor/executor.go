@@ -10,6 +10,5 @@ type Executor interface {
 	ExecuteDotfiles(dotfiles *models.DotfilesGroup, dryRun bool) ([]models.MigrationTask, error)
 	ExecutePreferences(prefs *models.PreferencesGroup, dryRun bool) ([]models.MigrationTask, error)
 	ExecuteEnvironment(env *models.EnvironmentGroup, dryRun bool) ([]models.MigrationTask, error)
-	ValidateState(state *models.MigrationState) error
+	ValidateState(state *models.MigrationState, dryRun bool) error
 }
-
