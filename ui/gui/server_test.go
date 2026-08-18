@@ -2,10 +2,12 @@ package gui
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -83,7 +85,7 @@ func TestSaveUploadedStateRejectsUnsupportedFile(t *testing.T) {
 }
 
 func TestServerRoutesAreReady(t *testing.T) {
-	server := NewServer("0")
+	server := NewServer("0", "9.8.7")
 	request := httptest.NewRequest("GET", "http://localhost/api/status", nil)
 	recorder := httptest.NewRecorder()
 
@@ -94,6 +96,86 @@ func TestServerRoutesAreReady(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"status":"ok"`) {
 		t.Fatalf("response = %q, want healthy status", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"version":"9.8.7"`) {
+		t.Fatalf("response = %q, want runtime version", recorder.Body.String())
+	}
+}
+
+func TestIndexUsesRuntimeVersionAndDarculaPalette(t *testing.T) {
+	server := NewServer("0", "9.8.7")
+	request := httptest.NewRequest("GET", "http://localhost/", nil)
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	for _, expected := range []string{"v9.8.7", "#2B2B2B", "#3C3F41", "#A9B7C6", "#CC7832", "#6897BB"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("index does not contain %q", expected)
+		}
+	}
+	if strings.Contains(body, "v1.0.0") {
+		t.Fatal("index contains stale hardcoded version")
+	}
+}
+
+func TestStateHandlerDetectsDefaultCapture(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	statePath := filepath.Join(homeDir, "wave-state.yaml")
+	if err := os.WriteFile(statePath, []byte("version: 1.0.0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewServer("0", "1.0.1")
+	request := httptest.NewRequest("GET", "http://localhost/api/state", nil)
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != 200 {
+		t.Fatalf("status code = %d, response = %q", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Exists bool   `json:"exists"`
+		Path   string `json:"path"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Exists || response.Path != statePath {
+		t.Fatalf("response = %#v, want detected default state", response)
+	}
+}
+
+func TestApplyHandlerUsesDefaultCapture(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	statePath := filepath.Join(homeDir, "wave-state.yaml")
+	state := "version: 1.0.0\ndotfiles:\n  files:\n    - source: /missing/config.lua\n      destination: /target/config.lua\n"
+	if err := os.WriteFile(statePath, []byte(state), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("use-default", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("dry-run", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewServer("0", "1.0.1")
+	request := httptest.NewRequest("POST", "http://localhost/api/apply", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"success":true`) {
+		t.Fatalf("status code = %d, response = %q", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -116,7 +198,7 @@ func TestApplyHandlerAcceptsUploadedState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := NewServer("0")
+	server := NewServer("0", "1.0.1")
 	request := httptest.NewRequest("POST", "http://localhost/api/apply", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	recorder := httptest.NewRecorder()
@@ -144,7 +226,7 @@ func TestApplyHandlerRejectsLiveMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := NewServer("0")
+	server := NewServer("0", "1.0.1")
 	request := httptest.NewRequest("POST", "http://localhost/api/apply", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	recorder := httptest.NewRecorder()
@@ -159,7 +241,7 @@ func TestApplyHandlerRejectsLiveMigration(t *testing.T) {
 }
 
 func TestServerRejectsCrossOriginAPIRequest(t *testing.T) {
-	server := NewServer("0")
+	server := NewServer("0", "1.0.1")
 	request := httptest.NewRequest("GET", "http://localhost/api/status", nil)
 	request.Header.Set("Origin", "https://example.com")
 	recorder := httptest.NewRecorder()
@@ -172,7 +254,7 @@ func TestServerRejectsCrossOriginAPIRequest(t *testing.T) {
 }
 
 func TestServerRejectsNonLoopbackHost(t *testing.T) {
-	server := NewServer("0")
+	server := NewServer("0", "1.0.1")
 	request := httptest.NewRequest("GET", "http://example.com/api/status", nil)
 	recorder := httptest.NewRecorder()
 

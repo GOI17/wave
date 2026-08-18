@@ -7,8 +7,11 @@ func TestGUICommandStartsServer(t *testing.T) {
 	defer func() { startGUI = originalStartGUI }()
 
 	var startedPort string
-	startGUI = func(port string) error {
+	startGUI = func(port, version string) error {
 		startedPort = port
+		if version != Version {
+			t.Fatalf("GUI version = %q, want %q", version, Version)
+		}
 		return nil
 	}
 

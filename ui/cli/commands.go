@@ -21,7 +21,7 @@ var (
 	dryRun     bool
 	startGUI   = gui.StartGUI
 	// Version is overridden with release build flags.
-	Version = "1.0.1"
+	Version = "1.0.2"
 )
 
 // RootCmd is the root command
@@ -146,7 +146,7 @@ var tuiCmd = &cobra.Command{
 	Long:  `Start the interactive terminal user interface for migration workflows.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("🌊 Wave TUI")
-		return tui.StartTUI()
+		return tui.StartTUI(Version)
 	},
 }
 
@@ -156,7 +156,7 @@ var guiCmd = &cobra.Command{
 	Short: "Launch desktop GUI",
 	Long:  `Start the web-based graphical interface for migration workflows.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return startGUI(cmd.Flag("port").Value.String())
+		return startGUI(cmd.Flag("port").Value.String(), Version)
 	},
 }
 

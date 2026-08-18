@@ -1,6 +1,6 @@
 .PHONY: help build clean test run capture apply tidy fmt lint install release docker version
 
-VERSION=1.0.0
+VERSION=1.0.2
 BINARY=wave
 BUILD_DIR=build
 
@@ -48,7 +48,7 @@ help:
 build:
 	@echo "🔨 Building Wave CLI v$(VERSION)..."
 	mkdir -p $(BUILD_DIR)
-	go build -ldflags="-X main.Version=$(VERSION)" -o $(BINARY) ./cmd/wave
+	go build -ldflags="-s -w -X wave/ui/cli.Version=$(VERSION)" -o $(BINARY) ./cmd/wave
 	@echo "✓ Build complete: ./$(BINARY)"
 
 install: build
@@ -142,4 +142,3 @@ docker:
 	@echo "   Test with: docker run -it wave:latest --help"
 
 .DEFAULT_GOAL := help
-

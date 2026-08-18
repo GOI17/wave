@@ -11,13 +11,22 @@ import (
 )
 
 var (
-	docStyle   = lipgloss.NewStyle().Margin(1, 2)
+	docStyle = lipgloss.NewStyle().
+			Margin(1, 2).
+			Padding(1, 2).
+			Background(lipgloss.Color("#2B2B2B")).
+			Foreground(lipgloss.Color("#A9B7C6"))
 	titleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("205")).
+			Foreground(lipgloss.Color("#CC7832")).
+			Background(lipgloss.Color("#2B2B2B")).
 			Bold(true)
 	highlightStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("212")).
+			Foreground(lipgloss.Color("#6897BB")).
+			Background(lipgloss.Color("#2B2B2B")).
 			Bold(true)
+	mutedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#808080")).
+			Background(lipgloss.Color("#2B2B2B"))
 )
 
 // Model represents the TUI state
@@ -28,10 +37,11 @@ type Model struct {
 	selected    map[int]bool
 	status      string
 	run         func(cmdType) tea.Cmd
+	version     string
 }
 
 // InitialModel creates a new model
-func InitialModel() Model {
+func InitialModel(version string) Model {
 	return Model{
 		currentStep: 0,
 		choices: []string{
@@ -43,6 +53,7 @@ func InitialModel() Model {
 		},
 		selected: make(map[int]bool),
 		run:      runCommand,
+		version:  version,
 	}
 }
 
@@ -101,7 +112,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View implements tea.Model
 func (m Model) View() string {
-	s := titleStyle.Render("🌊 Wave – macOS Device Migrator") + "\n\n"
+	s := titleStyle.Render(fmt.Sprintf("🌊 Wave v%s – macOS Device Migrator", m.version)) + "\n\n"
 	s += "Choose an action:\n\n"
 
 	for i, choice := range m.choices {
@@ -113,7 +124,7 @@ func (m Model) View() string {
 		s += fmt.Sprintf("%s %s\n", cursor, choice)
 	}
 
-	s += "\nUse arrow keys or j/k to navigate, enter to select, q to quit\n"
+	s += "\n" + mutedStyle.Render("Use arrow keys or j/k to navigate, enter to select, q to quit") + "\n"
 	if m.status != "" {
 		s += "\n" + m.status + "\n"
 	}
@@ -196,8 +207,8 @@ type cmdMsg struct {
 }
 
 // StartTUI launches the TUI
-func StartTUI() error {
-	p := tea.NewProgram(InitialModel())
+func StartTUI(version string) error {
+	p := tea.NewProgram(InitialModel(version))
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("error running tui: %w", err)
 	}

@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Wave v1.0.0 Build and Test Script
+# Wave Build and Test Script
 # Complete build, test, and release automation
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.0.2"
 PROJECT="Wave"
 BINARY="wave"
 BUILD_DIR="./build"
@@ -80,17 +80,17 @@ cmd_build() {
     
     # Build for macOS
     GOOS=darwin GOARCH=arm64 go build \
-        -ldflags="-s -w -X main.Version=$VERSION" \
+		-ldflags="-s -w -X wave/ui/cli.Version=$VERSION" \
         -o "$BUILD_DIR/$BINARY-darwin-arm64" \
         ./cmd/wave
     
     GOOS=darwin GOARCH=amd64 go build \
-        -ldflags="-s -w -X main.Version=$VERSION" \
+		-ldflags="-s -w -X wave/ui/cli.Version=$VERSION" \
         -o "$BUILD_DIR/$BINARY-darwin-amd64" \
         ./cmd/wave
     
     # Also build for current platform
-    go build -o "$BINARY" ./cmd/wave
+    go build -ldflags="-s -w -X wave/ui/cli.Version=$VERSION" -o "$BINARY" ./cmd/wave
     
     print_success "Build complete"
     print_info "Output:"

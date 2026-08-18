@@ -3,6 +3,7 @@ package gui
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -24,13 +25,15 @@ type Server struct {
 	port        string
 	mux         *http.ServeMux
 	operationMu sync.Mutex
+	version     string
 }
 
 // NewServer creates a new GUI server
-func NewServer(port string) *Server {
+func NewServer(port, version string) *Server {
 	server := &Server{
-		port: port,
-		mux:  http.NewServeMux(),
+		port:    port,
+		mux:     http.NewServeMux(),
+		version: version,
 	}
 	server.setupRoutes()
 	return server
@@ -120,7 +123,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 // indexHandler serves the web UI
 func (s *Server) indexHandler(w http.ResponseWriter, r *http.Request) {
-	html := getIndexHTML()
+	html := getIndexHTML(s.version)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, html)
@@ -156,18 +159,31 @@ func (s *Server) applyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
-	inputPath, format, cleanup, err := saveUploadedState(r)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-	defer cleanup()
-
 	if r.FormValue("dry-run") != "true" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "GUI migrations require dry-run mode"})
 		return
 	}
 	dryRun := true
+
+	inputPath := ""
+	format := "yaml"
+	cleanup := func() {}
+	if r.FormValue("use-default") == "true" {
+		homeDir, _ := os.UserHomeDir()
+		inputPath = filepath.Join(homeDir, "wave-state.yaml")
+		if _, err := os.Stat(inputPath); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "default captured state is not available"})
+			return
+		}
+	} else {
+		var err error
+		inputPath, format, cleanup, err = saveUploadedState(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+	}
+	defer cleanup()
 
 	homeDir, _ := os.UserHomeDir()
 	analyzer := analyzer.NewMacOSAnalyzer(homeDir)
@@ -228,20 +244,29 @@ func saveUploadedState(r *http.Request) (string, string, func(), error) {
 
 // statusHandler returns server status
 func (s *Server) statusHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "1.0.0"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": s.version})
 }
 
-// stateHandler serves captured state
+// stateHandler reports whether the default captured state is available.
 func (s *Server) stateHandler(w http.ResponseWriter, r *http.Request) {
 	homeDir, _ := os.UserHomeDir()
 	stateFile := filepath.Join(homeDir, "wave-state.yaml")
-
-	http.ServeFile(w, r, stateFile)
+	info, err := os.Stat(stateFile)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"exists": false, "path": stateFile})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exists":   true,
+		"path":     stateFile,
+		"size":     info.Size(),
+		"modified": info.ModTime(),
+	})
 }
 
 // getIndexHTML returns the web UI HTML
-func getIndexHTML() string {
-	return `<!DOCTYPE html>
+func getIndexHTML(version string) string {
+	page := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -256,7 +281,8 @@ func getIndexHTML() string {
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #2B2B2B;
+			color: #A9B7C6;
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -265,7 +291,8 @@ func getIndexHTML() string {
         }
 
         .container {
-            background: white;
+			background: #3C3F41;
+			border: 1px solid #515151;
             border-radius: 12px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             max-width: 600px;
@@ -274,8 +301,9 @@ func getIndexHTML() string {
         }
 
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+			background: #313335;
+			color: #CC7832;
+			border-bottom: 1px solid #515151;
             padding: 40px 30px;
             text-align: center;
         }
@@ -301,7 +329,7 @@ func getIndexHTML() string {
 
         .section h2 {
             font-size: 1.3em;
-            color: #333;
+			color: #FFC66D;
             margin-bottom: 20px;
             display: flex;
             align-items: center;
@@ -314,8 +342,9 @@ func getIndexHTML() string {
         .button {
             display: inline-block;
             padding: 12px 24px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+			background: #365880;
+			color: #F2F2F2;
+			border: 1px solid #4E78A6;
             border: none;
             border-radius: 6px;
             font-size: 1em;
@@ -327,7 +356,8 @@ func getIndexHTML() string {
 
         .button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+			background: #416A96;
+			box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
         }
 
         .button:active {
@@ -335,13 +365,13 @@ func getIndexHTML() string {
         }
 
         .button.secondary {
-            background: #f0f0f0;
-            color: #333;
+			background: #4E5254;
+			color: #A9B7C6;
             margin-top: 10px;
         }
 
         .button.secondary:hover {
-            background: #e0e0e0;
+			background: #5A5E60;
         }
 
         .status {
@@ -352,21 +382,21 @@ func getIndexHTML() string {
         }
 
         .status.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+			background: #294436;
+			color: #6A8759;
+			border: 1px solid #4E6B55;
         }
 
         .status.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+			background: #4A2F32;
+			color: #FF6B68;
+			border: 1px solid #7A4548;
         }
 
         .status.info {
-            background: #d1ecf1;
-            color: #0c5460;
-            border: 1px solid #bee5eb;
+			background: #283A4D;
+			color: #6897BB;
+			border: 1px solid #3D5D78;
         }
 
         .loading {
@@ -377,7 +407,7 @@ func getIndexHTML() string {
 
         .spinner {
             border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
+			border-top: 3px solid #CC7832;
             border-radius: 50%;
             width: 40px;
             height: 40px;
@@ -398,7 +428,9 @@ func getIndexHTML() string {
             display: block;
             width: 100%;
             padding: 10px;
-            border: 2px solid #ddd;
+			border: 1px solid #5E6060;
+			background: #2B2B2B;
+			color: #A9B7C6;
             border-radius: 6px;
             font-size: 0.9em;
         }
@@ -417,19 +449,19 @@ func getIndexHTML() string {
         }
 
         footer {
-            background: #f5f5f5;
+			background: #313335;
             padding: 20px 30px;
             text-align: center;
-            color: #666;
+			color: #808080;
             font-size: 0.9em;
-            border-top: 1px solid #eee;
+			border-top: 1px solid #515151;
         }
 
         .tabs {
             display: flex;
             gap: 10px;
             margin-bottom: 20px;
-            border-bottom: 2px solid #eee;
+			border-bottom: 1px solid #515151;
         }
 
         .tab {
@@ -438,14 +470,14 @@ func getIndexHTML() string {
             border: none;
             cursor: pointer;
             font-size: 1em;
-            color: #999;
+			color: #808080;
             border-bottom: 3px solid transparent;
             transition: all 0.2s;
         }
 
         .tab.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
+			color: #CC7832;
+			border-bottom-color: #CC7832;
         }
 
         .tab-content {
@@ -461,13 +493,13 @@ func getIndexHTML() string {
     <div class="container">
         <div class="header">
             <h1>🌊 Wave</h1>
-            <p>macOS Device Migrator v1.0.0</p>
+			<p>macOS Device Migrator v{{VERSION}}</p>
         </div>
 
         <div class="content">
             <div class="tabs">
                 <button class="tab active" onclick="switchTab(this, 'capture')">📦 Capture</button>
-                <button class="tab" onclick="switchTab(this, 'apply')">⚡ Apply</button>
+				<button class="tab" onclick="switchTab(this, 'apply')">⚡ Preview</button>
                 <button class="tab" onclick="switchTab(this, 'info')">ℹ️ Info</button>
             </div>
 
@@ -484,7 +516,8 @@ func getIndexHTML() string {
             <!-- Apply Tab -->
             <div id="apply" class="tab-content">
                 <div class="section">
-                    <h2><span>⚡</span>Apply Migration</h2>
+					<h2><span>⚡</span>Preview Migration</h2>
+					<div id="default-state" class="status info" hidden></div>
                     <div class="file-input-wrapper">
                         <label for="state-file">Choose state file:</label>
                         <input type="file" id="state-file" accept=".yaml,.yml,.json">
@@ -502,7 +535,7 @@ func getIndexHTML() string {
             <div id="info" class="tab-content">
                 <div class="section">
                     <h2><span>ℹ️</span>About Wave</h2>
-                    <p><strong>Wave v1.0.0</strong> is a comprehensive macOS device migration tool.</p>
+					<p><strong>Wave v{{VERSION}}</strong> captures and previews macOS migration plans.</p>
                     <h3 style="margin-top: 20px; margin-bottom: 10px; font-size: 1.1em;">Features:</h3>
                     <ul style="margin-left: 20px; line-height: 1.8;">
                         <li>📦 Capture Homebrew apps</li>
@@ -522,7 +555,7 @@ func getIndexHTML() string {
         </div>
 
         <footer>
-            <p>Wave v1.0.0 • macOS Device Migrator • Open Source</p>
+			<p>Wave v{{VERSION}} • macOS Device Migrator • Open Source</p>
         </footer>
     </div>
 
@@ -558,6 +591,7 @@ func getIndexHTML() string {
                 .then(data => {
                     if (data.success) {
                         showStatus('capture-status', '✅ State captured successfully! File: ' + data.file, 'success');
+						loadDefaultState();
                     } else {
                         showStatus('capture-status', '❌ Error: ' + data.error, 'error');
                     }
@@ -568,16 +602,21 @@ func getIndexHTML() string {
         function applyState() {
             const fileInput = document.getElementById('state-file');
             const dryRun = document.getElementById('dry-run').checked;
+			const formData = new FormData();
 
             if (!fileInput.value) {
-                showStatus('apply-status', '❌ Please select a state file', 'error');
-                return;
+				if (window.waveDefaultState) {
+					formData.append('use-default', 'true');
+				} else {
+					showStatus('apply-status', '❌ Please select a state file', 'error');
+					return;
+				}
+			} else {
+				formData.append('file', fileInput.files[0]);
             }
 
             showStatus('apply-status', 'Applying migration preview...', 'info');
 
-            const formData = new FormData();
-            formData.append('file', fileInput.files[0]);
             formData.append('dry-run', dryRun);
 
             fetch('/api/apply', { method: 'POST', body: formData })
@@ -591,14 +630,32 @@ func getIndexHTML() string {
                 })
                 .catch(err => showStatus('apply-status', '❌ Error: ' + err.message, 'error'));
         }
+
+		function loadDefaultState() {
+			fetch('/api/state')
+				.then(r => r.json())
+				.then(data => {
+					window.waveDefaultState = data.exists ? data : null;
+					const status = document.getElementById('default-state');
+					if (data.exists) {
+						status.hidden = false;
+						status.textContent = 'Using captured state: ' + data.path;
+					} else {
+						status.hidden = true;
+					}
+				});
+		}
+
+		loadDefaultState();
     </script>
 </body>
 </html>
-`
+	`
+	return strings.ReplaceAll(page, "{{VERSION}}", html.EscapeString(version))
 }
 
 // StartGUI launches the web GUI
-func StartGUI(port string) error {
-	server := NewServer(port)
+func StartGUI(port, version string) error {
+	server := NewServer(port, version)
 	return server.Start()
 }

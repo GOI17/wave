@@ -97,6 +97,16 @@ func (e *macOSExecutor) ExecuteDotfiles(dotfiles *models.DotfilesGroup, dryRun b
 			Dry:      dryRun,
 		}
 
+		if dryRun {
+			if _, err := os.Stat(dotfile.Source); err != nil {
+				task.Status = "skipped"
+				task.Error = fmt.Sprintf("source unavailable: %v", err)
+				task.ExecutedAt = time.Now()
+				tasks = append(tasks, task)
+				continue
+			}
+		}
+
 		if err := e.copyDotfile(dotfile, dryRun); err != nil {
 			task.Status = "failed"
 			task.Error = err.Error()
@@ -332,9 +342,6 @@ func (e *macOSExecutor) copyDotfile(dotfile models.DotfileEntry, dryRun bool) er
 	dst := dotfile.Destination
 
 	if dryRun {
-		if _, err := os.Stat(src); err != nil {
-			return fmt.Errorf("read source: %w", err)
-		}
 		fmt.Printf("DRY-RUN: Would copy %s to %s\n", src, dst)
 		return nil
 	}

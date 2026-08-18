@@ -192,14 +192,20 @@ func TestExecuteEnvironmentRejectsHardLinkedBackup(t *testing.T) {
 	}
 }
 
-func TestExecuteDotfilesDryRunValidatesSource(t *testing.T) {
+func TestExecuteDotfilesDryRunReportsMissingSourceWithoutFailing(t *testing.T) {
 	executor := &macOSExecutor{}
-	_, err := executor.ExecuteDotfiles(&models.DotfilesGroup{Files: []models.DotfileEntry{{
+	tasks, err := executor.ExecuteDotfiles(&models.DotfilesGroup{Files: []models.DotfileEntry{{
 		Source:      filepath.Join(t.TempDir(), "missing"),
 		Destination: filepath.Join(t.TempDir(), "destination"),
 	}}}, true)
-	if err == nil {
-		t.Fatal("dry-run accepted a missing source")
+	if err != nil {
+		t.Fatalf("dry-run returned error for unavailable source: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Status != "skipped" {
+		t.Fatalf("tasks = %#v, want one skipped task", tasks)
+	}
+	if !strings.Contains(tasks[0].Error, "source unavailable") {
+		t.Fatalf("task error = %q, want source unavailable warning", tasks[0].Error)
 	}
 }
 

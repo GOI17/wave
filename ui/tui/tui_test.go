@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestModelRunsSelectedAction(t *testing.T) {
@@ -23,7 +24,7 @@ func TestModelRunsSelectedAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := InitialModel()
+			model := InitialModel("1.0.1")
 			model.cursor = tt.cursor
 			model.run = func(cmd cmdType) tea.Cmd {
 				if cmd != tt.want {
@@ -46,7 +47,7 @@ func TestModelRunsSelectedAction(t *testing.T) {
 }
 
 func TestModelShowsCommandError(t *testing.T) {
-	model := InitialModel()
+	model := InitialModel("1.0.1")
 	model.run = func(cmd cmdType) tea.Cmd {
 		return commandResult(cmd, errors.New("boom"))
 	}
@@ -55,6 +56,16 @@ func TestModelShowsCommandError(t *testing.T) {
 	updated, _ = updated.(Model).Update(command())
 	if !strings.Contains(updated.(Model).status, "boom") {
 		t.Fatalf("status = %q, want command error", updated.(Model).status)
+	}
+}
+
+func TestViewUsesRuntimeVersionAndDarculaPalette(t *testing.T) {
+	view := InitialModel("9.8.7").View()
+	if !strings.Contains(view, "v9.8.7") {
+		t.Fatalf("view = %q, want runtime version", view)
+	}
+	if titleStyle.GetForeground() != lipgloss.Color("#CC7832") {
+		t.Fatalf("title foreground = %q, want Darcula orange", titleStyle.GetForeground())
 	}
 }
 
