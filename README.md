@@ -24,15 +24,35 @@ preferences, and shell environment metadata. It does not replace a backup tool.
 
 ## Install
 
-### Beta Binary
+### Homebrew (Recommended)
 
-The fixes documented here are published by the `main` workflow under the
-[`beta` prerelease](https://github.com/GOI17/wave/releases/tag/beta). Do not use
-the older `v1.0.0` stable binary for migration workflows.
+```bash
+brew tap GOI17/wave
+brew install GOI17/wave/wave
+
+# Verify
+wave version
+```
+
+The qualified formula name avoids a collision with the unrelated Wave Terminal
+package already available in Homebrew. The installed command is still `wave`.
+
+Upgrade or uninstall with:
+
+```bash
+brew upgrade GOI17/wave/wave
+brew uninstall GOI17/wave/wave
+```
+
+### Release Binary
+
+Download version `1.0.1` or newer from the
+[releases page](https://github.com/GOI17/wave/releases). Do not use the older
+`v1.0.0` binary for migration workflows.
 
 ```bash
 # Apple Silicon
-curl -LO https://github.com/GOI17/wave/releases/download/beta/wave-Darwin-arm64
+curl -LO https://github.com/GOI17/wave/releases/download/v1.0.1/wave-Darwin-arm64
 chmod +x wave-Darwin-arm64
 sudo mv wave-Darwin-arm64 /usr/local/bin/wave
 
@@ -42,7 +62,7 @@ wave version
 
 Intel Macs use `wave-Darwin-amd64` instead.
 
-### Build From Source (Recommended)
+### Build From Source
 
 Requires Go 1.23 or newer:
 

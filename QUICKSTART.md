@@ -5,8 +5,18 @@ Cross-machine live restore is not implemented yet.
 
 ## 1. Install
 
-Building the current `main` branch is recommended. The older `v1.0.0` stable
-binary does not contain the safety fixes documented here.
+Install through the Wave tap:
+
+```bash
+brew tap GOI17/wave
+brew install GOI17/wave/wave
+wave version
+```
+
+The qualified formula name distinguishes this project from the unrelated Wave
+Terminal package. After installation, use the normal `wave` command.
+
+To build from source instead:
 
 ```bash
 git clone https://github.com/GOI17/wave.git
@@ -15,17 +25,6 @@ make build
 sudo mv wave /usr/local/bin/wave
 wave version
 ```
-
-The current Apple Silicon beta binary is also available:
-
-```bash
-curl -LO https://github.com/GOI17/wave/releases/download/beta/wave-Darwin-arm64
-chmod +x wave-Darwin-arm64
-sudo mv wave-Darwin-arm64 /usr/local/bin/wave
-wave version
-```
-
-For Intel Macs, replace `arm64` with `amd64`.
 
 ## 2. Capture
 
