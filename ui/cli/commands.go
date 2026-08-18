@@ -20,6 +20,8 @@ var (
 	format     string
 	dryRun     bool
 	startGUI   = gui.StartGUI
+	// Version is overridden with release build flags.
+	Version = "1.0.1"
 )
 
 // RootCmd is the root command
@@ -29,7 +31,7 @@ var RootCmd = &cobra.Command{
 	Long: `Wave is a comprehensive tool to replicate macOS device settings, dotfiles, applications, and configurations.
 
 It supports CLI, TUI, and GUI interfaces for migration workflows.`,
-	Version: "1.0.0",
+	Version: Version,
 }
 
 // captureCmd exports current device state
@@ -163,7 +165,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("🌊 Wave v1.0.0")
+		fmt.Printf("🌊 Wave v%s\n", Version)
 		fmt.Println("macOS Device Migrator")
 		fmt.Println("\nFeatures:")
 		fmt.Println("  ✓ CLI - Full-featured command line")

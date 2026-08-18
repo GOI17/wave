@@ -44,7 +44,9 @@ jobs:
           GOOS: darwin
           GOARCH: ${{ matrix.arch }}
         run: |
-          go build -o wave-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/wave
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then VERSION="beta"; fi
+          go build -ldflags="-s -w -X wave/ui/cli.Version=${VERSION}" -o wave-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/wave
           file wave-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
       
       - name: Upload Artifact
@@ -100,12 +102,17 @@ jobs:
               cp "$dir"/wave-Darwin-* release/
             fi
           done
+          cd release
+          sha256sum wave-Darwin-* > SHA256SUMS
+          cd ..
           ls -lah release/
       
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release/wave-Darwin-*
+          files: |
+            release/wave-Darwin-*
+            release/SHA256SUMS
           body_path: RELEASE_BODY.md
           draft: false
           prerelease: false
@@ -134,12 +141,17 @@ jobs:
               cp "$dir"/wave-Darwin-* release/
             fi
           done
+          cd release
+          sha256sum wave-Darwin-* > SHA256SUMS
+          cd ..
           ls -lah release/
       
       - name: Create or Update Beta Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release/wave-Darwin-*
+          files: |
+            release/wave-Darwin-*
+            release/SHA256SUMS
           tag_name: beta
           name: Beta Build
           body: |
