@@ -21,7 +21,7 @@ var (
 	dryRun     bool
 	startGUI   = gui.StartGUI
 	// Version is overridden with release build flags.
-	Version = "1.0.2"
+	Version = "1.0.3"
 )
 
 // RootCmd is the root command
@@ -108,7 +108,11 @@ var applyCmd = &cobra.Command{
 		executor := executor.NewMacOSExecutor(homeDir, dryRun)
 		mig := migrator.NewMigrator(analyzer, executor)
 
-		if err := mig.Apply(inputPath, dryRun, format); err != nil {
+		result, err := mig.Apply(inputPath, dryRun, format)
+		if result != nil {
+			fmt.Print("\n" + migrator.FormatSummary(result))
+		}
+		if err != nil {
 			return fmt.Errorf("apply failed: %w", err)
 		}
 

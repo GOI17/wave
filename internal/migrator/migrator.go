@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"wave/internal/analyzer"
@@ -65,53 +66,93 @@ func (m *Migrator) Capture(outputPath string, format string) error {
 	return m.saveState(state, outputPath, format)
 }
 
-// Apply loads state from file and applies to target device
-func (m *Migrator) Apply(inputPath string, dryRun bool, format string) error {
+// Apply loads state from file and applies to target device.
+func (m *Migrator) Apply(inputPath string, dryRun bool, format string) (*models.MigrationResult, error) {
 	state, err := m.loadState(inputPath, format)
 	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
+		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
 
 	// Validate state
 	if err := m.executor.ValidateState(state, dryRun); err != nil {
-		return fmt.Errorf("validation failed: %w", err)
+		return nil, fmt.Errorf("validation failed: %w", err)
 	}
+	result := &models.MigrationResult{DryRun: dryRun, Warnings: []string{}}
 
 	// Execute applications
 	appTasks, err := m.executor.ExecuteApplications(&state.Applications, dryRun)
+	addCategory(result, "Applications", appTasks)
 	if err != nil {
-		return fmt.Errorf("failed to execute applications: %w", err)
+		return result, fmt.Errorf("failed to execute applications: %w", err)
 	}
-	fmt.Printf("Processed %d application tasks\n", len(appTasks))
 
 	// Execute dotfiles
 	dotfileTasks, err := m.executor.ExecuteDotfiles(&state.Dotfiles, dryRun)
+	addCategory(result, "Dotfiles", dotfileTasks)
 	if err != nil {
-		return fmt.Errorf("failed to execute dotfiles: %w", err)
+		return result, fmt.Errorf("failed to execute dotfiles: %w", err)
 	}
-	fmt.Printf("Processed %d dotfile tasks\n", len(dotfileTasks))
 
 	// Execute preferences
 	prefTasks, err := m.executor.ExecutePreferences(&state.Preferences, dryRun)
+	addCategory(result, "Preferences", prefTasks)
 	if err != nil {
-		return fmt.Errorf("failed to execute preferences: %w", err)
+		return result, fmt.Errorf("failed to execute preferences: %w", err)
 	}
-	fmt.Printf("Processed %d preference tasks\n", len(prefTasks))
 
 	// Execute environment
 	envTasks, err := m.executor.ExecuteEnvironment(&state.Environment, dryRun)
+	addCategory(result, "Environment", envTasks)
 	if err != nil {
-		return fmt.Errorf("failed to execute environment: %w", err)
+		return result, fmt.Errorf("failed to execute environment: %w", err)
 	}
-	fmt.Printf("Processed %d environment tasks\n", len(envTasks))
 
-	if dryRun {
-		fmt.Println("\n✓ Dry-run completed. No changes were applied.")
+	return result, nil
+}
+
+func addCategory(result *models.MigrationResult, name string, tasks []models.MigrationTask) {
+	category := models.MigrationCategoryResult{Name: name, Total: len(tasks)}
+	for _, task := range tasks {
+		switch task.Status {
+		case "success":
+			category.Successful++
+			result.Successful++
+		case "skipped":
+			category.Skipped++
+			result.Skipped++
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %s", task.Name, task.Error))
+		case "failed":
+			category.Failed++
+			result.Failed++
+		}
+	}
+	result.Total += len(tasks)
+	result.Categories = append(result.Categories, category)
+}
+
+// FormatSummary renders the canonical migration summary used by every UI.
+func FormatSummary(result *models.MigrationResult) string {
+	var summary strings.Builder
+	summary.WriteString("Migration Preview Summary\n")
+	summary.WriteString("=========================\n")
+	for _, category := range result.Categories {
+		fmt.Fprintf(&summary, "%-12s %3d total  %3d ready  %3d skipped  %3d failed\n",
+			category.Name+":", category.Total, category.Successful, category.Skipped, category.Failed)
+	}
+	fmt.Fprintf(&summary, "%-12s %3d total  %3d ready  %3d skipped  %3d failed\n",
+		"Total:", result.Total, result.Successful, result.Skipped, result.Failed)
+	if len(result.Warnings) > 0 {
+		summary.WriteString("\nWarnings:\n")
+		for _, warning := range result.Warnings {
+			fmt.Fprintf(&summary, "- %s\n", warning)
+		}
+	}
+	if result.DryRun {
+		summary.WriteString("\nDry-run completed. No changes were applied.\n")
 	} else {
-		fmt.Println("\n✓ Migration completed successfully.")
+		summary.WriteString("\nMigration completed successfully.\n")
 	}
-
-	return nil
+	return summary.String()
 }
 
 // saveState writes migration state to file

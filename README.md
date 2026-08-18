@@ -46,13 +46,13 @@ brew uninstall GOI17/wave/wave
 
 ### Release Binary
 
-Download version `1.0.2` or newer from the
+Download version `1.0.3` or newer from the
 [releases page](https://github.com/GOI17/wave/releases). Do not use the older
 `v1.0.0` binary for migration workflows.
 
 ```bash
 # Apple Silicon
-curl -LO https://github.com/GOI17/wave/releases/download/v1.0.2/wave-Darwin-arm64
+curl -LO https://github.com/GOI17/wave/releases/download/v1.0.3/wave-Darwin-arm64
 chmod +x wave-Darwin-arm64
 sudo mv wave-Darwin-arm64 /usr/local/bin/wave
 

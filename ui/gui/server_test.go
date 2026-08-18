@@ -177,6 +177,11 @@ func TestApplyHandlerUsesDefaultCapture(t *testing.T) {
 	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"success":true`) {
 		t.Fatalf("status code = %d, response = %q", recorder.Code, recorder.Body.String())
 	}
+	for _, expected := range []string{`"summary":"Migration Preview Summary`, `"skipped":1`, `Copy config.lua`} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("response = %q, want %q", recorder.Body.String(), expected)
+		}
+	}
 }
 
 func TestApplyHandlerAcceptsUploadedState(t *testing.T) {
@@ -210,6 +215,9 @@ func TestApplyHandlerAcceptsUploadedState(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), `"success":true`) {
 		t.Fatalf("response = %q, want success", recorder.Body.String())
 	}
+	if !strings.Contains(recorder.Body.String(), `"summary":"Migration Preview Summary`) {
+		t.Fatalf("response = %q, want shared preview summary", recorder.Body.String())
+	}
 }
 
 func TestApplyHandlerRejectsLiveMigration(t *testing.T) {
@@ -237,6 +245,37 @@ func TestApplyHandlerRejectsLiveMigration(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "require dry-run") {
 		t.Fatalf("response = %q, want dry-run rejection", recorder.Body.String())
+	}
+}
+
+func TestApplyHandlerReturnsPartialSummaryOnError(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	statePath := filepath.Join(homeDir, "wave-state.yaml")
+	state := "version: 1.0.0\nenvironment:\n  shell_profile: " + filepath.Join(homeDir, ".zshrc") + "\n  env_vars:\n    'BAD;NAME': value\n"
+	if err := os.WriteFile(statePath, []byte(state), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("use-default", "true")
+	_ = writer.WriteField("dry-run", "true")
+	_ = writer.Close()
+
+	server := NewServer("0", "1.0.3")
+	request := httptest.NewRequest("POST", "http://localhost/api/apply", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != 400 {
+		t.Fatalf("status code = %d, response = %q", recorder.Code, recorder.Body.String())
+	}
+	for _, expected := range []string{`"success":false`, `"summary":"Migration Preview Summary`, "invalid environment variable name"} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("response = %q, want %q", recorder.Body.String(), expected)
+		}
 	}
 }
 

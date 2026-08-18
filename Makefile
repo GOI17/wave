@@ -1,6 +1,6 @@
 .PHONY: help build clean test run capture apply tidy fmt lint install release docker version
 
-VERSION=1.0.2
+VERSION=1.0.3
 BINARY=wave
 BUILD_DIR=build
 

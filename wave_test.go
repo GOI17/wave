@@ -172,7 +172,7 @@ func TestMigrationApplyDryRun(t *testing.T) {
 	}
 
 	// Then apply (dry-run)
-	err = m.Apply(tempFile, true, "yaml")
+	_, err = m.Apply(tempFile, true, "yaml")
 	if err != nil {
 		t.Fatalf("Apply (dry-run) failed: %v", err)
 	}

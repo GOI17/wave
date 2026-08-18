@@ -15,28 +15,28 @@ type MigrationState struct {
 
 // DeviceInfo captures source device metadata
 type DeviceInfo struct {
-	Hostname    string `yaml:"hostname" json:"hostname"`
-	Username    string `yaml:"username" json:"username"`
-	FullName    string `yaml:"full_name" json:"full_name"`
-	OSVersion   string `yaml:"os_version" json:"os_version"`
+	Hostname     string `yaml:"hostname" json:"hostname"`
+	Username     string `yaml:"username" json:"username"`
+	FullName     string `yaml:"full_name" json:"full_name"`
+	OSVersion    string `yaml:"os_version" json:"os_version"`
 	Architecture string `yaml:"architecture" json:"architecture"`
-	Shell       string `yaml:"shell" json:"shell"`
+	Shell        string `yaml:"shell" json:"shell"`
 }
 
 // ApplicationGroup groups application management
 type ApplicationGroup struct {
-	Homebrew     []HomebrewPackage `yaml:"homebrew" json:"homebrew"`
-	AppStore     []AppStoreApp     `yaml:"app_store" json:"app_store"`
-	Manual       []ManualApp       `yaml:"manual" json:"manual"`
-	VSCodeExtensions []string      `yaml:"vscode_extensions" json:"vscode_extensions"`
+	Homebrew         []HomebrewPackage `yaml:"homebrew" json:"homebrew"`
+	AppStore         []AppStoreApp     `yaml:"app_store" json:"app_store"`
+	Manual           []ManualApp       `yaml:"manual" json:"manual"`
+	VSCodeExtensions []string          `yaml:"vscode_extensions" json:"vscode_extensions"`
 }
 
 // HomebrewPackage represents a Homebrew formula/cask
 type HomebrewPackage struct {
-	Name     string `yaml:"name" json:"name"`
-	Type     string `yaml:"type" json:"type"` // formula, cask, tap
-	Version  string `yaml:"version" json:"version"`
-	Pinned   bool   `yaml:"pinned" json:"pinned"`
+	Name    string `yaml:"name" json:"name"`
+	Type    string `yaml:"type" json:"type"` // formula, cask, tap
+	Version string `yaml:"version" json:"version"`
+	Pinned  bool   `yaml:"pinned" json:"pinned"`
 }
 
 // AppStoreApp represents an App Store application
@@ -48,9 +48,9 @@ type AppStoreApp struct {
 
 // ManualApp represents manually installed apps
 type ManualApp struct {
-	Name     string `yaml:"name" json:"name"`
-	Path     string `yaml:"path" json:"path"`
-	Version  string `yaml:"version" json:"version"`
+	Name    string `yaml:"name" json:"name"`
+	Path    string `yaml:"path" json:"path"`
+	Version string `yaml:"version" json:"version"`
 }
 
 // DotfilesGroup groups dotfiles and configuration
@@ -61,9 +61,9 @@ type DotfilesGroup struct {
 
 // DotfileEntry represents a dotfile
 type DotfileEntry struct {
-	Source      string `yaml:"source" json:"source"`            // Path on source device
-	Destination string `yaml:"destination" json:"destination"`  // Path on target device
-	Checksum    string `yaml:"checksum" json:"checksum"`        // SHA256 for verification
+	Source      string `yaml:"source" json:"source"`             // Path on source device
+	Destination string `yaml:"destination" json:"destination"`   // Path on target device
+	Checksum    string `yaml:"checksum" json:"checksum"`         // SHA256 for verification
 	ContentHash string `yaml:"content_hash" json:"content_hash"` // Hash of actual content
 }
 
@@ -76,11 +76,11 @@ type DirEntry struct {
 
 // PreferencesGroup groups system and app preferences
 type PreferencesGroup struct {
-	Finder   FinderPrefs   `yaml:"finder" json:"finder"`
-	Dock     DockPrefs     `yaml:"dock" json:"dock"`
-	Keyboard KeyboardPrefs `yaml:"keyboard" json:"keyboard"`
-	Trackpad TrackpadPrefs `yaml:"trackpad" json:"trackpad"`
-	System   SystemPrefs   `yaml:"system" json:"system"`
+	Finder   FinderPrefs            `yaml:"finder" json:"finder"`
+	Dock     DockPrefs              `yaml:"dock" json:"dock"`
+	Keyboard KeyboardPrefs          `yaml:"keyboard" json:"keyboard"`
+	Trackpad TrackpadPrefs          `yaml:"trackpad" json:"trackpad"`
+	System   SystemPrefs            `yaml:"system" json:"system"`
 	Apps     map[string]interface{} `yaml:"apps" json:"apps"` // App-specific preferences (plist)
 }
 
@@ -92,18 +92,18 @@ type FinderPrefs struct {
 
 // DockPrefs for Dock settings
 type DockPrefs struct {
-	Position      string `yaml:"position" json:"position"`           // left, right, bottom
-	Autohide      bool   `yaml:"autohide" json:"autohide"`
-	ShowRecents   bool   `yaml:"show_recents" json:"show_recents"`
-	AppOrder      []string `yaml:"app_order" json:"app_order"`       // Bundle IDs in order
+	Position       string   `yaml:"position" json:"position"` // left, right, bottom
+	Autohide       bool     `yaml:"autohide" json:"autohide"`
+	ShowRecents    bool     `yaml:"show_recents" json:"show_recents"`
+	AppOrder       []string `yaml:"app_order" json:"app_order"` // Bundle IDs in order
 	PersistentApps []string `yaml:"persistent_apps" json:"persistent_apps"`
 }
 
 // KeyboardPrefs for Keyboard settings
 type KeyboardPrefs struct {
-	KeyRepeat       int  `yaml:"key_repeat" json:"key_repeat"`
-	InitialRepeat   int  `yaml:"initial_repeat" json:"initial_repeat"`
-	NumLock         bool `yaml:"num_lock" json:"num_lock"`
+	KeyRepeat     int  `yaml:"key_repeat" json:"key_repeat"`
+	InitialRepeat int  `yaml:"initial_repeat" json:"initial_repeat"`
+	NumLock       bool `yaml:"num_lock" json:"num_lock"`
 }
 
 // TrackpadPrefs for Trackpad settings
@@ -115,38 +115,58 @@ type TrackpadPrefs struct {
 
 // SystemPrefs for general system settings
 type SystemPrefs struct {
-	ComputerName    string `yaml:"computer_name" json:"computer_name"`
-	TimeZone        string `yaml:"time_zone" json:"time_zone"`
-	Language        string `yaml:"language" json:"language"`
-	ScreenBrightness int  `yaml:"screen_brightness" json:"screen_brightness"`
+	ComputerName     string `yaml:"computer_name" json:"computer_name"`
+	TimeZone         string `yaml:"time_zone" json:"time_zone"`
+	Language         string `yaml:"language" json:"language"`
+	ScreenBrightness int    `yaml:"screen_brightness" json:"screen_brightness"`
 }
 
 // EnvironmentGroup groups shell environment configuration
 type EnvironmentGroup struct {
-	Shell         string            `yaml:"shell" json:"shell"`
-	ShellProfile  string            `yaml:"shell_profile" json:"shell_profile"` // ~/.zshrc, ~/.bash_profile
+	Shell           string            `yaml:"shell" json:"shell"`
+	ShellProfile    string            `yaml:"shell_profile" json:"shell_profile"` // ~/.zshrc, ~/.bash_profile
 	EnvironmentVars map[string]string `yaml:"env_vars" json:"env_vars"`
-	Aliases       map[string]string `yaml:"aliases" json:"aliases"`
-	Functions     map[string]string `yaml:"functions" json:"functions"`
-	Homebrew      HomebrewEnv       `yaml:"homebrew" json:"homebrew"`
-	NodeVersion   string            `yaml:"node_version" json:"node_version"`
-	PythonVersion string            `yaml:"python_version" json:"python_version"`
+	Aliases         map[string]string `yaml:"aliases" json:"aliases"`
+	Functions       map[string]string `yaml:"functions" json:"functions"`
+	Homebrew        HomebrewEnv       `yaml:"homebrew" json:"homebrew"`
+	NodeVersion     string            `yaml:"node_version" json:"node_version"`
+	PythonVersion   string            `yaml:"python_version" json:"python_version"`
 }
 
 // HomebrewEnv captures Homebrew configuration
 type HomebrewEnv struct {
-	Prefix string `yaml:"prefix" json:"prefix"`
+	Prefix string   `yaml:"prefix" json:"prefix"`
 	Taps   []string `yaml:"taps" json:"taps"`
 }
 
 // MigrationTask represents a single migration action
 type MigrationTask struct {
-	ID          string `yaml:"id" json:"id"`
-	Name        string `yaml:"name" json:"name"`
-	Category    string `yaml:"category" json:"category"`     // apps, dotfiles, preferences, etc
-	Action      string `yaml:"action" json:"action"`         // install, copy, configure
-	Dry         bool   `yaml:"dry" json:"dry"`               // Dry-run mode
-	Status      string `yaml:"status" json:"status"`         // pending, running, success, failed
-	Error       string `yaml:"error" json:"error"`
-	ExecutedAt  time.Time `yaml:"executed_at" json:"executed_at"`
+	ID         string    `yaml:"id" json:"id"`
+	Name       string    `yaml:"name" json:"name"`
+	Category   string    `yaml:"category" json:"category"` // apps, dotfiles, preferences, etc
+	Action     string    `yaml:"action" json:"action"`     // install, copy, configure
+	Dry        bool      `yaml:"dry" json:"dry"`           // Dry-run mode
+	Status     string    `yaml:"status" json:"status"`     // pending, running, success, failed
+	Error      string    `yaml:"error" json:"error"`
+	ExecutedAt time.Time `yaml:"executed_at" json:"executed_at"`
+}
+
+// MigrationResult summarizes one apply or preview operation.
+type MigrationResult struct {
+	DryRun     bool                      `json:"dry_run"`
+	Categories []MigrationCategoryResult `json:"categories"`
+	Total      int                       `json:"total"`
+	Successful int                       `json:"successful"`
+	Skipped    int                       `json:"skipped"`
+	Failed     int                       `json:"failed"`
+	Warnings   []string                  `json:"warnings"`
+}
+
+// MigrationCategoryResult summarizes tasks in one migration category.
+type MigrationCategoryResult struct {
+	Name       string `json:"name"`
+	Total      int    `json:"total"`
+	Successful int    `json:"successful"`
+	Skipped    int    `json:"skipped"`
+	Failed     int    `json:"failed"`
 }

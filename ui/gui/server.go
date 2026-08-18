@@ -190,12 +190,22 @@ func (s *Server) applyHandler(w http.ResponseWriter, r *http.Request) {
 	executor := executor.NewMacOSExecutor(homeDir, dryRun)
 	mig := migrator.NewMigrator(analyzer, executor)
 
-	if err := mig.Apply(inputPath, dryRun, format); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+	result, err := mig.Apply(inputPath, dryRun, format)
+	if err != nil {
+		response := map[string]any{"success": false, "error": err.Error()}
+		if result != nil {
+			response["result"] = result
+			response["summary"] = migrator.FormatSummary(result)
+		}
+		writeJSON(w, http.StatusBadRequest, response)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"result":  result,
+		"summary": migrator.FormatSummary(result),
+	})
 }
 
 func saveUploadedState(r *http.Request) (string, string, func(), error) {
@@ -399,6 +409,20 @@ func getIndexHTML(version string) string {
 			border: 1px solid #3D5D78;
         }
 
+		.preview-summary {
+			background: #2B2B2B;
+			border: 1px solid #515151;
+			border-radius: 6px;
+			color: #A9B7C6;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+			font-size: 0.82rem;
+			line-height: 1.55;
+			margin-top: 15px;
+			overflow-x: auto;
+			padding: 15px;
+			white-space: pre-wrap;
+		}
+
         .loading {
             display: block;
             text-align: center;
@@ -583,6 +607,15 @@ func getIndexHTML(version string) string {
             elem.appendChild(status);
         }
 
+		function showPreviewSummary(elementId, summary) {
+			const elem = document.getElementById(elementId);
+			elem.replaceChildren();
+			const report = document.createElement('pre');
+			report.className = 'preview-summary';
+			report.textContent = summary;
+			elem.appendChild(report);
+		}
+
         function captureState() {
             showStatus('capture-status', 'Capturing device state...', 'info');
 
@@ -623,9 +656,13 @@ func getIndexHTML(version string) string {
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        showStatus('apply-status', '✅ Migration preview completed!', 'success');
+						showPreviewSummary('apply-status', data.summary);
                     } else {
-                        showStatus('apply-status', '❌ Error: ' + data.error, 'error');
+						if (data.summary) {
+							showPreviewSummary('apply-status', data.summary + '\nError: ' + data.error);
+						} else {
+							showStatus('apply-status', '❌ Error: ' + data.error, 'error');
+						}
                     }
                 })
                 .catch(err => showStatus('apply-status', '❌ Error: ' + err.message, 'error'));
