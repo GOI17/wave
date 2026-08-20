@@ -4,8 +4,10 @@ Wave captures a structured inventory of a macOS machine and provides CLI, TUI,
 and local web interfaces for reviewing migration plans.
 
 > [!WARNING]
-> Apply and rollback currently mutate vetted root dotfiles only. Applications,
-> preferences, `.config`, nested files, and credentials are preview-only.
+> Apply supports vetted root dotfiles, captured applications, and captured
+> preferences. Rollback restores files and settings but retains installed apps
+> for manual cleanup because Wave cannot prove exclusive ownership. Manual apps
+> without install payloads, `.config`, nested files, and credentials are not applied.
 
 ## Current Capabilities
 
@@ -148,11 +150,16 @@ wave --help
 
 ## Safety Limits
 
-- Only immediate root dotfiles that pass strict safety checks are bundled and
-  applied. `.config`, nested files, symlinks, applications, preferences, and
-  credentials are never mutated.
+- Immediate root dotfiles that pass strict safety checks are bundled and applied.
+  Homebrew packages, VS Code extensions, App Store apps available through `mas`,
+  and captured Finder, Dock, keyboard, computer name, timezone, and language
+  settings are also applied. Manual apps are reported for manual installation.
+- `.config`, nested files, symlinks, and credentials are never mutated.
 - Rollback restores exact original file identity. If a file changed after
   Apply, Wave preserves it and reports a conflict instead of overwriting it.
+- Applications installed during Apply are intentionally retained during
+  Rollback and listed for manual cleanup; Wave never uninstalls software it
+  cannot prove is exclusively owned by the transaction.
 - Transaction data is retained under `~/.wave/transactions` for recovery.
 - Malformed transaction metadata blocks Apply until explicitly quarantined with
   `wave transactions quarantine --transaction ID --confirm`.

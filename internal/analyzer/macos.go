@@ -83,6 +83,10 @@ func (a *macOSAnalyzer) AnalyzeApplications() (*models.ApplicationGroup, error) 
 	masApps, _ := a.getMasApps()
 	apps.AppStore = masApps
 
+	// Manual apps have no portable install payload, but retain enough metadata
+	// to report what still needs to be installed on the target Mac.
+	apps.Manual = a.getManualApps(apps)
+
 	return apps, nil
 }
 
@@ -231,18 +235,18 @@ func (a *macOSAnalyzer) getFullName(username string) string {
 }
 
 func (a *macOSAnalyzer) getHomebrewFormulas() ([]models.HomebrewPackage, error) {
-	cmd := exec.Command("bash", "-c", "brew list --formula --json 2>/dev/null || echo '[]'")
-	output, _ := cmd.Output()
-
-	var result []map[string]interface{}
-	json.Unmarshal(output, &result)
-
+	cmd := exec.Command("brew", "leaves")
+	output, err := cmd.Output()
+	if err != nil {
+		return []models.HomebrewPackage{}, nil
+	}
 	packages := []models.HomebrewPackage{}
-	for _, pkg := range result {
+	for _, name := range strings.Fields(string(output)) {
+		version, _ := a.execCommand("brew", "list", "--versions", name)
 		packages = append(packages, models.HomebrewPackage{
-			Name:    a.asString(pkg["name"]),
+			Name:    name,
 			Type:    "formula",
-			Version: a.asString(pkg["version"]),
+			Version: version,
 		})
 	}
 	return packages, nil
@@ -292,12 +296,61 @@ func (a *macOSAnalyzer) getMasApps() ([]models.AppStoreApp, error) {
 		if len(parts) >= 2 {
 			apps = append(apps, models.AppStoreApp{
 				BundleID: parts[0],
-				Name:     strings.Join(parts[1 : len(parts)-1], " "),
+				Name:     strings.Join(parts[1:len(parts)-1], " "),
 				Version:  parts[len(parts)-1],
 			})
 		}
 	}
 	return apps, nil
+}
+
+func (a *macOSAnalyzer) getManualApps(managed *models.ApplicationGroup) []models.ManualApp {
+	managedBundleIDs := make(map[string]bool)
+	managedNames := make(map[string]bool)
+	for _, app := range managed.AppStore {
+		managedBundleIDs[app.BundleID] = true
+		managedNames[normalizeAppName(app.Name)] = true
+	}
+	for _, app := range managed.Homebrew {
+		if app.Type == "cask" {
+			managedNames[normalizeAppName(app.Name)] = true
+		}
+	}
+	return a.scanManualApps([]string{"/Applications", filepath.Join(a.homeDir, "Applications")}, managedBundleIDs, managedNames)
+}
+
+func (a *macOSAnalyzer) scanManualApps(directories []string, managedBundleIDs, managedNames map[string]bool) []models.ManualApp {
+	var apps []models.ManualApp
+	seen := make(map[string]bool)
+	for _, directory := range directories {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".app") {
+				continue
+			}
+			path := filepath.Join(directory, entry.Name())
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+			version, _ := a.execCommand("defaults", "read", filepath.Join(path, "Contents", "Info"), "CFBundleShortVersionString")
+			bundleID, _ := a.execCommand("defaults", "read", filepath.Join(path, "Contents", "Info"), "CFBundleIdentifier")
+			if managedBundleIDs[bundleID] || managedNames[normalizeAppName(name)] {
+				continue
+			}
+			apps = append(apps, models.ManualApp{Name: name, Path: path, Version: version, BundleID: bundleID})
+		}
+	}
+	return apps
+}
+
+func normalizeAppName(value string) string {
+	value = strings.ToLower(value)
+	return strings.NewReplacer(" ", "", "-", "", "_", "", ".", "").Replace(value)
 }
 
 func (a *macOSAnalyzer) scanDirectory(path string, dotfiles *models.DotfilesGroup, depth int) {
@@ -418,19 +471,34 @@ func (a *macOSAnalyzer) getComputerName() string {
 }
 
 func (a *macOSAnalyzer) getTimeZone() string {
-	cmd := exec.Command("systemsetup", "-gettimezone")
-	output, _ := cmd.Output()
-	result := strings.TrimSpace(string(output))
-	if strings.Contains(result, "TimeZone: ") {
-		return strings.TrimPrefix(result, "TimeZone: ")
+	target, err := os.Readlink("/etc/localtime")
+	if err != nil {
+		return ""
 	}
-	return "UTC"
+	const marker = "/zoneinfo/"
+	if index := strings.Index(target, marker); index >= 0 {
+		return target[index+len(marker):]
+	}
+	return ""
 }
 
 func (a *macOSAnalyzer) getLanguage() string {
 	cmd := exec.Command("defaults", "read", "-g", "AppleLanguages")
 	output, _ := cmd.Output()
-	return strings.TrimSpace(string(output))
+	return normalizeCapturedLanguage(string(output))
+}
+
+func normalizeCapturedLanguage(output string) string {
+	value := strings.TrimSpace(output)
+	value = strings.Trim(value, "() \n\t")
+	var languages []string
+	for _, language := range strings.Split(value, ",") {
+		language = strings.Trim(strings.TrimSpace(language), `"`)
+		if language != "" {
+			languages = append(languages, language)
+		}
+	}
+	return strings.Join(languages, ",")
 }
 
 func (a *macOSAnalyzer) computeSHA256(filePath string) (string, error) {

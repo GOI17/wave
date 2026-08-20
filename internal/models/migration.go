@@ -48,9 +48,10 @@ type AppStoreApp struct {
 
 // ManualApp represents manually installed apps
 type ManualApp struct {
-	Name    string `yaml:"name" json:"name"`
-	Path    string `yaml:"path" json:"path"`
-	Version string `yaml:"version" json:"version"`
+	Name     string `yaml:"name" json:"name"`
+	Path     string `yaml:"path" json:"path"`
+	Version  string `yaml:"version" json:"version"`
+	BundleID string `yaml:"bundle_id" json:"bundle_id"`
 }
 
 // DotfilesGroup groups dotfiles and configuration

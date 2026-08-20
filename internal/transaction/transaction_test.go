@@ -1,6 +1,7 @@
 package transaction_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,7 +268,7 @@ func TestApplyRejectsDestinationSymlink(t *testing.T) {
 	assertFile(t, realTarget, "original", 0600)
 }
 
-func TestApplyLeavesPreferencesAndPackagesPreviewOnly(t *testing.T) {
+func TestApplyAndRollbackApplicationsAndPreferences(t *testing.T) {
 	sourceHome := t.TempDir()
 	targetHome := t.TempDir()
 	bundlePath := filepath.Join(t.TempDir(), "device.wave")
@@ -275,11 +276,15 @@ func TestApplyLeavesPreferencesAndPackagesPreviewOnly(t *testing.T) {
 		Version: "1.0.0",
 		Applications: models.ApplicationGroup{
 			Homebrew:         []models.HomebrewPackage{{Name: "jq", Type: "formula"}},
+			AppStore:         []models.AppStoreApp{{BundleID: "12345", Name: "Example"}},
+			Manual:           []models.ManualApp{{Name: "Manual Tool", Path: "/Applications/Manual Tool.app"}},
 			VSCodeExtensions: []string{"publisher.extension"},
 		},
 		Preferences: models.PreferencesGroup{
-			Finder: models.FinderPrefs{ShowHiddenFiles: true},
-			Dock:   models.DockPrefs{Autohide: true},
+			Finder:   models.FinderPrefs{ShowHiddenFiles: true, DefaultViewMode: "clmv"},
+			Dock:     models.DockPrefs{Autohide: true, ShowRecents: false, Position: "left"},
+			Keyboard: models.KeyboardPrefs{KeyRepeat: 2, InitialRepeat: 15},
+			System:   models.SystemPrefs{ComputerName: "Migrated Mac", TimeZone: "America/Chicago", Language: "en"},
 		},
 	}
 	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
@@ -287,18 +292,141 @@ func TestApplyLeavesPreferencesAndPackagesPreviewOnly(t *testing.T) {
 	}
 	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
 
-	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
+	system := newFakeSystem()
+	system.preferences["com.apple.finder:AppleShowAllFiles"] = fakePreference{kind: "bool", value: "false"}
+	system.preferences["com.apple.dock:autohide"] = fakePreference{kind: "bool", value: "false"}
+	system.preferences["com.apple.dock:show-recents"] = fakePreference{kind: "bool", value: "true"}
+	system.system["computer-name"] = "Original Mac"
+	system.system["time-zone"] = "UTC"
+	system.system["language"] = "es"
+
+	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
+	if len(journal.Packages) != 3 || len(journal.Preferences) != 7 || len(journal.System) != 3 || len(journal.Unresolved) != 1 {
+		t.Fatalf("journal = %#v", journal)
+	}
 
-	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
+	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
 	if err != nil {
 		t.Fatalf("Rollback() error = %v", err)
 	}
-	if result.Restored != 0 || result.Removed != 0 || result.Conflicts != 0 {
+	if result.PreferencesRestored != 7 || result.PackagesRemoved != 0 || result.ApplicationsRetained != 3 || result.SystemRestored != 3 || result.Conflicts != 0 {
 		t.Fatalf("rollback result = %#v", result)
 	}
+	if _, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system); err != nil {
+		t.Fatalf("Apply() after retained-app rollback error = %v", err)
+	}
+}
+
+type fakePreference struct {
+	kind  string
+	value string
+}
+
+type fakeSystem struct {
+	preferences map[string]fakePreference
+	packages    map[string]string
+	extensions  map[string]bool
+	appStore    map[string]bool
+	system      map[string]string
+}
+
+func newFakeSystem() *fakeSystem {
+	return &fakeSystem{preferences: map[string]fakePreference{}, packages: map[string]string{}, extensions: map[string]bool{}, appStore: map[string]bool{}, system: map[string]string{}}
+}
+
+func (s *fakeSystem) Output(name string, args ...string) (string, error) {
+	switch name {
+	case "defaults":
+		if args[0] == "read" && args[1] == "-g" && args[2] == "AppleLanguages" {
+			return s.system["language"], nil
+		}
+		key := args[1] + ":" + args[2]
+		value, ok := s.preferences[key]
+		if !ok {
+			return "", fmt.Errorf("not found")
+		}
+		if args[0] == "read-type" {
+			return map[string]string{"bool": "Type is boolean", "int": "Type is integer", "string": "Type is string"}[value.kind], nil
+		}
+		return value.value, nil
+	case "brew":
+		var installed []string
+		for name := range s.packages {
+			installed = append(installed, name)
+		}
+		return strings.Join(installed, "\n"), nil
+	case "code":
+		var installed []string
+		for extension, exists := range s.extensions {
+			if exists {
+				installed = append(installed, extension)
+			}
+		}
+		return strings.Join(installed, "\n"), nil
+	case "mas":
+		var installed []string
+		for id, exists := range s.appStore {
+			if exists {
+				installed = append(installed, id+" Example")
+			}
+		}
+		return strings.Join(installed, "\n"), nil
+	case "scutil":
+		return s.system["computer-name"], nil
+	case "systemsetup":
+		return "", fmt.Errorf("unsupported direct systemsetup read")
+	case "readlink":
+		return "/usr/share/zoneinfo/" + s.system["time-zone"], nil
+	default:
+		return "", fmt.Errorf("unsupported output: %s", name)
+	}
+}
+
+func (s *fakeSystem) Run(name string, args ...string) error {
+	switch name {
+	case "defaults":
+		if args[0] == "delete" {
+			delete(s.preferences, args[1]+":"+args[2])
+			return nil
+		}
+		if args[1] == "-g" && args[2] == "AppleLanguages" {
+			s.system["language"] = strings.Join(args[4:], ",")
+			return nil
+		}
+		s.preferences[args[1]+":"+args[2]] = fakePreference{kind: strings.TrimPrefix(args[3], "-"), value: args[4]}
+	case "brew":
+		name := args[len(args)-1]
+		if args[0] == "install" {
+			s.packages[name] = name + " 1.0"
+		} else {
+			delete(s.packages, name)
+		}
+	case "code":
+		s.extensions[args[1]] = args[0] == "--install-extension"
+	case "mas":
+		s.appStore[args[1]] = args[0] == "install"
+	case "osascript":
+		script := args[1]
+		if strings.Contains(script, "scutil") {
+			if strings.Contains(script, "Original Mac") {
+				s.system["computer-name"] = "Original Mac"
+			} else {
+				s.system["computer-name"] = "Migrated Mac"
+			}
+		} else if strings.Contains(script, "systemsetup") {
+			if strings.Contains(script, "America/Chicago") {
+				s.system["time-zone"] = "America/Chicago"
+			} else {
+				s.system["time-zone"] = "UTC"
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported run: %s", name)
+	}
+	return nil
 }
 
 func assertFile(t *testing.T, path, content string, mode os.FileMode) {

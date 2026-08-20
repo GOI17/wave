@@ -61,6 +61,8 @@ wave rollback --confirm
 ```
 
 Files edited after Apply are preserved and reported as conflicts.
+Applications installed by Apply remain installed after Rollback and are listed
+for manual cleanup.
 
 ## 4. Choose An Interface
 
@@ -84,9 +86,10 @@ and Rollback. Type `APPLY` or `ROLLBACK` to confirm mutation.
 
 ## Important Limits
 
-- Apply currently changes vetted immediate root dotfiles only.
-- Applications, preferences, `.config`, nested files, symlinks, and credentials
-  are preview-only.
+- Apply changes vetted root dotfiles, Homebrew packages, VS Code extensions,
+  App Store apps available through `mas`, and captured preferences.
+- Manual apps are reported as unresolved because their bundles are not archived.
+- `.config`, nested files, symlinks, and credentials are preview-only.
 - Do not publish state files without reviewing them.
 - Do not transfer private keys or credentials through Wave.
 - Do not run CLI live apply against valuable user data.

@@ -29,7 +29,7 @@ var (
 	startGUI          = gui.StartGUI
 	runBrew           = runHomebrew
 	// Version is overridden with release build flags.
-	Version = "1.1.3"
+	Version = "1.2.0"
 )
 
 // RootCmd is the root command

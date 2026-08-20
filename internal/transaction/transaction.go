@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,11 +25,51 @@ const journalName = "journal.json"
 
 // Journal records the durable state needed to rollback one apply.
 type Journal struct {
-	Version   int           `json:"version"`
-	ID        string        `json:"id"`
-	CreatedAt time.Time     `json:"created_at"`
-	Status    string        `json:"status"`
-	Files     []FileJournal `json:"files"`
+	Version              int                 `json:"version"`
+	ID                   string              `json:"id"`
+	CreatedAt            time.Time           `json:"created_at"`
+	Status               string              `json:"status"`
+	Files                []FileJournal       `json:"files"`
+	Preferences          []PreferenceJournal `json:"preferences,omitempty"`
+	Packages             []PackageJournal    `json:"packages,omitempty"`
+	System               []SystemJournal     `json:"system,omitempty"`
+	Unresolved           []string            `json:"unresolved,omitempty"`
+	RetainedApplications []string            `json:"retained_applications,omitempty"`
+}
+
+type PreferenceJournal struct {
+	Domain       string `json:"domain"`
+	Key          string `json:"key"`
+	Existed      bool   `json:"existed"`
+	BeforeType   string `json:"before_type,omitempty"`
+	BeforeValue  string `json:"before_value,omitempty"`
+	AppliedType  string `json:"applied_type"`
+	AppliedValue string `json:"applied_value"`
+	Applying     bool   `json:"applying"`
+	Applied      bool   `json:"applied"`
+	RollingBack  bool   `json:"rolling_back"`
+	RolledBack   bool   `json:"rolled_back"`
+}
+
+type PackageJournal struct {
+	Manager        string `json:"manager"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	AppliedVersion string `json:"applied_version,omitempty"`
+	Applying       bool   `json:"applying"`
+	Applied        bool   `json:"applied"`
+	RollingBack    bool   `json:"rolling_back"`
+	RolledBack     bool   `json:"rolled_back"`
+}
+
+type SystemJournal struct {
+	Kind         string `json:"kind"`
+	Before       string `json:"before"`
+	AppliedValue string `json:"applied_value"`
+	Applying     bool   `json:"applying"`
+	Applied      bool   `json:"applied"`
+	RollingBack  bool   `json:"rolling_back"`
+	RolledBack   bool   `json:"rolled_back"`
 }
 
 // FileJournal records one applied file's before and after state.
@@ -52,11 +95,45 @@ type FileJournal struct {
 
 // RollbackResult summarizes a conflict-safe rollback.
 type RollbackResult struct {
-	TransactionID string   `json:"transaction_id"`
-	Restored      int      `json:"restored"`
-	Removed       int      `json:"removed"`
-	Conflicts     int      `json:"conflicts"`
-	ConflictPaths []string `json:"conflict_paths"`
+	TransactionID        string   `json:"transaction_id"`
+	Restored             int      `json:"restored"`
+	Removed              int      `json:"removed"`
+	PreferencesRestored  int      `json:"preferences_restored"`
+	PackagesRemoved      int      `json:"packages_removed"`
+	ApplicationsRetained int      `json:"applications_retained"`
+	RetainedApplications []string `json:"retained_applications"`
+	SystemRestored       int      `json:"system_restored"`
+	Conflicts            int      `json:"conflicts"`
+	ConflictPaths        []string `json:"conflict_paths"`
+}
+
+type System interface {
+	Output(name string, args ...string) (string, error)
+	Run(name string, args ...string) error
+}
+
+type executableSystem interface {
+	LookPath(name string) error
+}
+
+type execSystem struct{}
+
+func (execSystem) Output(name string, args ...string) (string, error) {
+	output, err := exec.Command(name, args...).CombinedOutput()
+	return strings.TrimSpace(string(output)), err
+}
+
+func (execSystem) Run(name string, args ...string) error {
+	command := exec.Command(name, args...)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	return command.Run()
+}
+
+func (execSystem) LookPath(name string) error {
+	_, err := exec.LookPath(name)
+	return err
 }
 
 // Preview returns a non-mutating summary of a portable bundle.
@@ -73,17 +150,21 @@ func Preview(bundlePath string) (*models.MigrationResult, error) {
 	}
 	state := opened.Manifest.State
 	result := &models.MigrationResult{DryRun: true, Warnings: []string{}}
-	applicationCount := len(state.Applications.Homebrew) + len(state.Applications.VSCodeExtensions)
-	addPreviewCategory(result, "Applications", 0, applicationCount)
+	applicationCount := len(state.Applications.Homebrew) + len(state.Applications.VSCodeExtensions) + len(state.Applications.AppStore)
+	unresolvedApplications := len(state.Applications.Manual)
+	addPreviewCategory(result, "Applications", applicationCount, unresolvedApplications)
 	addPreviewCategory(result, "Dotfiles", len(opened.Manifest.Files), 0)
 	preferenceCount := countPreferences(state)
-	addPreviewCategory(result, "Preferences", 0, preferenceCount)
+	addPreviewCategory(result, "Preferences", preferenceCount, 0)
 	addPreviewCategory(result, "Environment", 0, 0)
-	if applicationCount > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("%d application changes are preview-only and will not be applied", applicationCount))
+	if unresolvedApplications > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d manual applications have no install payload and require manual installation", unresolvedApplications))
 	}
-	if preferenceCount > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("%d preference changes are preview-only and will not be applied", preferenceCount))
+	for _, warning := range previewPrerequisites(state, execSystem{}) {
+		result.Warnings = append(result.Warnings, warning)
+	}
+	if state.Preferences.System.ComputerName != "" || state.Preferences.System.TimeZone != "" {
+		result.Warnings = append(result.Warnings, "computer name and timezone changes require macOS administrator authorization")
 	}
 	if opened.Manifest.Excluded > 0 {
 		result.Skipped += opened.Manifest.Excluded
@@ -100,6 +181,49 @@ func addPreviewCategory(result *models.MigrationResult, name string, ready, skip
 	result.Total += ready + skipped
 	result.Successful += ready
 	result.Skipped += skipped
+}
+
+func previewPrerequisites(state *models.MigrationState, system System) []string {
+	lookup, ok := system.(executableSystem)
+	if !ok {
+		return nil
+	}
+	var warnings []string
+	if len(state.Applications.Homebrew) > 0 && lookup.LookPath("brew") != nil {
+		warnings = append(warnings, "Homebrew packages require the brew command on the target Mac")
+	}
+	if len(state.Applications.VSCodeExtensions) > 0 && lookup.LookPath("code") != nil {
+		warnings = append(warnings, "VS Code extensions require the code command on the target Mac")
+	}
+	if len(state.Applications.AppStore) > 0 && lookup.LookPath("mas") != nil {
+		warnings = append(warnings, "App Store applications require mas and an authenticated Apple ID")
+	}
+	return warnings
+}
+
+func validatePrerequisites(state *models.MigrationState, system System) error {
+	lookup, ok := system.(executableSystem)
+	if !ok {
+		return nil
+	}
+	for _, requirement := range []struct {
+		needed bool
+		name   string
+	}{
+		{len(state.Applications.Homebrew) > 0, "brew"},
+		{len(state.Applications.VSCodeExtensions) > 0, "code"},
+		{len(state.Applications.AppStore) > 0, "mas"},
+	} {
+		if requirement.needed && lookup.LookPath(requirement.name) != nil {
+			return fmt.Errorf("required command is unavailable: %s", requirement.name)
+		}
+	}
+	if len(state.Applications.AppStore) > 0 {
+		if _, err := system.Output("mas", "list"); err != nil {
+			return fmt.Errorf("App Store migration requires mas authentication")
+		}
+	}
+	return nil
 }
 
 // Latest returns the latest transaction that can still be rolled back.
@@ -185,7 +309,7 @@ func RollbackLatest(homeDir, transactionsDir string) (*RollbackResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rollbackUnlocked(latest.ID, homeDir, transactionsDir)
+	return rollbackUnlocked(latest.ID, homeDir, transactionsDir, execSystem{})
 }
 
 // FormatApplySummary renders the canonical apply completion summary.
@@ -198,10 +322,62 @@ func FormatApplySummary(journal *Journal) string {
 	for _, file := range journal.Files {
 		fmt.Fprintf(&summary, "- %s\n", file.Destination)
 	}
-	summary.WriteString("Applications: preview-only\n")
-	summary.WriteString("Preferences: preview-only\n")
+	fmt.Fprintf(&summary, "Applications installed: %d\n", appliedPackages(journal.Packages))
+	for _, item := range journal.Packages {
+		if item.Applied {
+			fmt.Fprintf(&summary, "- %s: %s\n", item.Manager, item.Name)
+		}
+	}
+	fmt.Fprintf(&summary, "Preferences applied: %d\n", appliedPreferences(journal.Preferences))
+	for _, item := range journal.Preferences {
+		if item.Applied {
+			fmt.Fprintf(&summary, "- %s:%s = %s\n", item.Domain, item.Key, item.AppliedValue)
+		}
+	}
+	fmt.Fprintf(&summary, "System settings applied: %d\n", appliedSystem(journal.System))
+	for _, item := range journal.System {
+		if item.Applied {
+			fmt.Fprintf(&summary, "- %s = %s\n", item.Kind, item.AppliedValue)
+		}
+	}
+	if len(journal.Unresolved) > 0 {
+		summary.WriteString("Unresolved items:\n")
+		for _, item := range journal.Unresolved {
+			fmt.Fprintf(&summary, "- %s\n", item)
+		}
+	}
 	fmt.Fprintf(&summary, "\nRollback with: wave rollback --transaction %s --confirm\n", journal.ID)
 	return summary.String()
+}
+
+func appliedPackages(items []PackageJournal) int {
+	count := 0
+	for _, item := range items {
+		if item.Applied {
+			count++
+		}
+	}
+	return count
+}
+
+func appliedPreferences(items []PreferenceJournal) int {
+	count := 0
+	for _, item := range items {
+		if item.Applied {
+			count++
+		}
+	}
+	return count
+}
+
+func appliedSystem(items []SystemJournal) int {
+	count := 0
+	for _, item := range items {
+		if item.Applied {
+			count++
+		}
+	}
+	return count
 }
 
 // FormatRollbackSummary renders the canonical rollback completion summary.
@@ -212,6 +388,13 @@ func FormatRollbackSummary(result *RollbackResult) string {
 	fmt.Fprintf(&summary, "Transaction: %s\n", result.TransactionID)
 	fmt.Fprintf(&summary, "Files restored: %d\n", result.Restored)
 	fmt.Fprintf(&summary, "Files removed: %d\n", result.Removed)
+	fmt.Fprintf(&summary, "Preferences restored: %d\n", result.PreferencesRestored)
+	fmt.Fprintf(&summary, "Applications removed: %d\n", result.PackagesRemoved)
+	fmt.Fprintf(&summary, "Applications retained: %d\n", result.ApplicationsRetained)
+	for _, application := range result.RetainedApplications {
+		fmt.Fprintf(&summary, "- %s (manual cleanup if unwanted)\n", application)
+	}
+	fmt.Fprintf(&summary, "System settings restored: %d\n", result.SystemRestored)
 	fmt.Fprintf(&summary, "Conflicts preserved: %d\n", result.Conflicts)
 	if result.Conflicts > 0 {
 		summary.WriteString("\nConflicts require manual resolution:\n")
@@ -224,16 +407,20 @@ func FormatRollbackSummary(result *RollbackResult) string {
 
 // Apply atomically applies file payloads and persists a write-ahead journal.
 func Apply(bundlePath, homeDir, transactionsDir string) (*Journal, error) {
+	return ApplyWithSystem(bundlePath, homeDir, transactionsDir, execSystem{})
+}
+
+func ApplyWithSystem(bundlePath, homeDir, transactionsDir string, system System) (*Journal, error) {
 	unlock, err := acquireLock(transactionsDir)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	return applyUnlocked(bundlePath, homeDir, transactionsDir)
+	return applyUnlocked(bundlePath, homeDir, transactionsDir, system)
 }
 
-func applyUnlocked(bundlePath, homeDir, transactionsDir string) (*Journal, error) {
-	if err := recoverUnfinished(homeDir, transactionsDir); err != nil {
+func applyUnlocked(bundlePath, homeDir, transactionsDir string, system System) (*Journal, error) {
+	if err := recoverUnfinished(homeDir, transactionsDir, system); err != nil {
 		return nil, err
 	}
 	opened, err := bundle.Open(bundlePath)
@@ -241,6 +428,9 @@ func applyUnlocked(bundlePath, homeDir, transactionsDir string) (*Journal, error
 		return nil, err
 	}
 	defer opened.Close()
+	if err := validatePrerequisites(opened.Manifest.State, system); err != nil {
+		return nil, err
+	}
 
 	id, err := transactionID()
 	if err != nil {
@@ -278,7 +468,7 @@ func applyUnlocked(bundlePath, homeDir, transactionsDir string) (*Journal, error
 	if err := syncDirectory(filepath.Join(dir, "staged")); err != nil {
 		return nil, err
 	}
-	journal := &Journal{Version: 1, ID: id, CreatedAt: time.Now().UTC(), Status: "preparing", Files: []FileJournal{}}
+	journal := &Journal{Version: 2, ID: id, CreatedAt: time.Now().UTC(), Status: "preparing", Files: []FileJournal{}, Preferences: []PreferenceJournal{}, Packages: []PackageJournal{}, System: []SystemJournal{}, Unresolved: []string{}}
 	if err := saveJournal(dir, journal); err != nil {
 		return nil, err
 	}
@@ -350,24 +540,33 @@ func applyUnlocked(bundlePath, homeDir, transactionsDir string) (*Journal, error
 		record := &journal.Files[i]
 		destination, err := destinationPath(homeDir, record.Destination)
 		if err != nil {
-			return recoverPartial(journal, homeDir, dir, err)
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		record.Applying = true
 		if err := saveJournal(dir, journal); err != nil {
-			return recoverPartial(journal, homeDir, dir, err)
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
-			return recoverPartial(journal, homeDir, dir, err)
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		err = swapInFile(destination, *record, dir)
 		if err != nil {
-			return recoverPartial(journal, homeDir, dir, err)
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		record.Applied = true
 		record.Applying = false
 		if err := saveJournal(dir, journal); err != nil {
-			return recoverPartial(journal, homeDir, dir, err)
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
+	}
+	if err := applyPreferences(journal, opened.Manifest.State, system, dir); err != nil {
+		return recoverPartial(journal, homeDir, dir, system, err)
+	}
+	if err := applySystemSettings(journal, opened.Manifest.State, system, dir); err != nil {
+		return recoverPartial(journal, homeDir, dir, system, err)
+	}
+	if err := applyPackages(journal, opened.Manifest.State, system, dir); err != nil {
+		return recoverPartial(journal, homeDir, dir, system, err)
 	}
 	journal.Status = "applied"
 	if err := saveJournal(dir, journal); err != nil {
@@ -378,15 +577,19 @@ func applyUnlocked(bundlePath, homeDir, transactionsDir string) (*Journal, error
 
 // Rollback restores items that still match the state written by Apply.
 func Rollback(id, homeDir, transactionsDir string) (*RollbackResult, error) {
+	return RollbackWithSystem(id, homeDir, transactionsDir, execSystem{})
+}
+
+func RollbackWithSystem(id, homeDir, transactionsDir string, system System) (*RollbackResult, error) {
 	unlock, err := acquireLock(transactionsDir)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	return rollbackUnlocked(id, homeDir, transactionsDir)
+	return rollbackUnlocked(id, homeDir, transactionsDir, system)
 }
 
-func rollbackUnlocked(id, homeDir, transactionsDir string) (*RollbackResult, error) {
+func rollbackUnlocked(id, homeDir, transactionsDir string, system System) (*RollbackResult, error) {
 	if !validTransactionID(id) {
 		return nil, fmt.Errorf("invalid transaction id")
 	}
@@ -398,11 +601,154 @@ func rollbackUnlocked(id, homeDir, transactionsDir string) (*RollbackResult, err
 	if journal.Status != "applied" && journal.Status != "rollback-conflicts" && journal.Status != "partial" && journal.Status != "preparing" {
 		return nil, fmt.Errorf("transaction cannot be rolled back from status %s", journal.Status)
 	}
-	return rollbackJournal(journal, homeDir, dir)
+	return rollbackJournal(journal, homeDir, dir, system)
 }
 
-func rollbackJournal(journal *Journal, homeDir, dir string) (*RollbackResult, error) {
-	result := &RollbackResult{TransactionID: journal.ID, ConflictPaths: []string{}}
+func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*RollbackResult, error) {
+	result := &RollbackResult{TransactionID: journal.ID, ConflictPaths: []string{}, RetainedApplications: append([]string(nil), journal.RetainedApplications...), ApplicationsRetained: len(journal.RetainedApplications)}
+	for i := len(journal.Packages) - 1; i >= 0; i-- {
+		record := &journal.Packages[i]
+		if record.RolledBack {
+			continue
+		}
+		if record.Applying && !record.Applied {
+			_, installed, probeErr := packageStatus(system, record.Manager, record.Name, record.Type)
+			if probeErr != nil {
+				addRollbackConflict(journal, result, dir, "application state unknown:"+record.Name)
+				continue
+			}
+			if installed {
+				record.Applied, record.Applying = true, false
+			} else {
+				record.RolledBack = true
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+		}
+		if !record.Applied {
+			continue
+		}
+		record.RolledBack = true
+		retained := record.Manager + ":" + record.Name
+		if !containsString(journal.RetainedApplications, retained) {
+			journal.RetainedApplications = append(journal.RetainedApplications, retained)
+			result.ApplicationsRetained++
+			result.RetainedApplications = append(result.RetainedApplications, retained)
+		}
+		if err := saveJournal(dir, journal); err != nil {
+			return result, err
+		}
+	}
+	for i := len(journal.System) - 1; i >= 0; i-- {
+		record := &journal.System[i]
+		if record.RolledBack {
+			continue
+		}
+		current, err := readSystemSetting(system, record.Kind)
+		if record.RollingBack && err == nil && current == record.Before {
+			record.RollingBack, record.RolledBack = false, true
+			result.SystemRestored++
+			if err := saveJournal(dir, journal); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if !record.Applied && record.Applying {
+			if err == nil && current == record.Before {
+				record.RolledBack = true
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if err == nil && current == record.AppliedValue {
+				record.Applied, record.Applying = true, false
+			} else {
+				addRollbackConflict(journal, result, dir, "system mutation interrupted:"+record.Kind)
+				continue
+			}
+		}
+		if !record.Applied {
+			addRollbackConflict(journal, result, dir, "system:"+record.Kind)
+			continue
+		}
+		if err != nil || current != record.AppliedValue {
+			addRollbackConflict(journal, result, dir, "system:"+record.Kind)
+			continue
+		}
+		record.RollingBack = true
+		if err := saveJournal(dir, journal); err != nil {
+			return result, err
+		}
+		if err := writeSystemSetting(system, record.Kind, record.Before); err != nil {
+			record.RollingBack = false
+			addRollbackConflict(journal, result, dir, "system restore failed:"+record.Kind)
+			continue
+		}
+		record.RollingBack, record.RolledBack = false, true
+		result.SystemRestored++
+		if err := saveJournal(dir, journal); err != nil {
+			return result, err
+		}
+	}
+	for i := len(journal.Preferences) - 1; i >= 0; i-- {
+		record := &journal.Preferences[i]
+		if record.RolledBack {
+			continue
+		}
+		current, err := readPreference(system, record.Domain, record.Key)
+		matchesBefore := err == nil && current.Existed == record.Existed && (!current.Existed || current.Type == record.BeforeType && current.Value == record.BeforeValue)
+		if record.RollingBack && matchesBefore {
+			record.RollingBack, record.RolledBack = false, true
+			result.PreferencesRestored++
+			if err := saveJournal(dir, journal); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if !record.Applied && record.Applying {
+			if matchesBefore {
+				record.RolledBack = true
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if err == nil && current.Existed && current.Type == record.AppliedType && current.Value == record.AppliedValue {
+				record.Applied, record.Applying = true, false
+			}
+		}
+		if !record.Applied {
+			addRollbackConflict(journal, result, dir, "preference:"+record.Domain+":"+record.Key)
+			continue
+		}
+		if err != nil || !current.Existed || current.Type != record.AppliedType || current.Value != record.AppliedValue {
+			addRollbackConflict(journal, result, dir, "preference:"+record.Domain+":"+record.Key)
+			continue
+		}
+		record.RollingBack = true
+		if err := saveJournal(dir, journal); err != nil {
+			return result, err
+		}
+		if record.Existed {
+			if err := writePreference(system, record.Domain, record.Key, record.BeforeType, record.BeforeValue); err != nil {
+				record.RollingBack = false
+				addRollbackConflict(journal, result, dir, "preference restore failed:"+record.Domain+":"+record.Key)
+				continue
+			}
+		} else if err := system.Run("defaults", "delete", record.Domain, record.Key); err != nil {
+			record.RollingBack = false
+			addRollbackConflict(journal, result, dir, "preference restore failed:"+record.Domain+":"+record.Key)
+			continue
+		}
+		record.RollingBack, record.RolledBack = false, true
+		result.PreferencesRestored++
+		if err := saveJournal(dir, journal); err != nil {
+			return result, err
+		}
+	}
 	for i := len(journal.Files) - 1; i >= 0; i-- {
 		record := &journal.Files[i]
 		if record.RolledBack {
@@ -410,7 +756,8 @@ func rollbackJournal(journal *Journal, homeDir, dir string) (*RollbackResult, er
 		}
 		destination, err := destinationPath(homeDir, record.Destination)
 		if err != nil {
-			return result, err
+			addRollbackConflict(journal, result, dir, "file path failed:"+record.Destination)
+			continue
 		}
 		currentHash, currentMode, currentDevice, currentInode, err := fileIdentity(destination)
 		if !record.Applied {
@@ -484,13 +831,16 @@ func rollbackJournal(journal *Journal, homeDir, dir string) (*RollbackResult, er
 			}
 			preserved := filepath.Join(dir, filepath.FromSlash(record.PreservedApplied))
 			if err := os.Rename(destination, preserved); err != nil {
-				return result, err
+				addRollbackConflict(journal, result, dir, "file restore failed:"+record.Destination)
+				continue
 			}
 			if err := syncDirectory(filepath.Dir(destination)); err != nil {
-				return result, err
+				addRollbackConflict(journal, result, dir, "file sync failed:"+record.Destination)
+				continue
 			}
 			if err := syncDirectory(filepath.Dir(preserved)); err != nil {
-				return result, err
+				addRollbackConflict(journal, result, dir, "transaction sync failed:"+record.Destination)
+				continue
 			}
 			_, _, device, inode, err := fileIdentity(preserved)
 			if err != nil || device != record.AppliedDevice || inode != record.AppliedInode {
@@ -513,7 +863,8 @@ func rollbackJournal(journal *Journal, homeDir, dir string) (*RollbackResult, er
 			result.Removed++
 		} else {
 			if err := swapRollbackFile(destination, dir, record); err != nil {
-				return result, err
+				addRollbackConflict(journal, result, dir, "file restore failed:"+record.Destination)
+				continue
 			}
 			record.PreservedApplied = record.Staged
 			result.Restored++
@@ -534,17 +885,36 @@ func rollbackJournal(journal *Journal, homeDir, dir string) (*RollbackResult, er
 	return result, nil
 }
 
-func recoverPartial(journal *Journal, homeDir, dir string, applyErr error) (*Journal, error) {
+func addRollbackConflict(journal *Journal, result *RollbackResult, dir, path string) {
+	result.Conflicts++
+	result.ConflictPaths = append(result.ConflictPaths, path)
+	journal.Status = "rollback-conflicts"
+	_ = saveJournal(dir, journal)
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func recoverPartial(journal *Journal, homeDir, dir string, system System, applyErr error) (*Journal, error) {
 	journal.Status = "partial"
 	_ = saveJournal(dir, journal)
-	result, rollbackErr := rollbackJournal(journal, homeDir, dir)
+	result, rollbackErr := rollbackJournal(journal, homeDir, dir, system)
 	if rollbackErr != nil || result.Conflicts > 0 {
-		return journal, fmt.Errorf("apply failed: %w; automatic rollback incomplete", applyErr)
+		return journal, fmt.Errorf("apply failed: %w; automatic rollback incomplete: %s", applyErr, strings.TrimSpace(FormatRollbackSummary(result)))
+	}
+	if result.ApplicationsRetained > 0 {
+		return journal, fmt.Errorf("apply failed: %w; files and settings were rolled back; %s", applyErr, strings.TrimSpace(FormatRollbackSummary(result)))
 	}
 	return journal, fmt.Errorf("apply failed and was rolled back: %w", applyErr)
 }
 
-func recoverUnfinished(homeDir, transactionsDir string) error {
+func recoverUnfinished(homeDir, transactionsDir string, system System) error {
 	entries, err := os.ReadDir(transactionsDir)
 	if err != nil {
 		return err
@@ -564,12 +934,337 @@ func recoverUnfinished(homeDir, transactionsDir string) error {
 			}
 			continue
 		}
-		result, err := rollbackJournal(journal, homeDir, dir)
+		result, err := rollbackJournal(journal, homeDir, dir, system)
 		if err != nil || result.Conflicts > 0 {
 			return fmt.Errorf("unfinished transaction %s requires rollback resolution", journal.ID)
 		}
+		if result.ApplicationsRetained > 0 {
+			return fmt.Errorf("unfinished transaction %s recovered with retained applications; review transaction before continuing: %s", journal.ID, strings.TrimSpace(FormatRollbackSummary(result)))
+		}
 	}
 	return nil
+}
+
+type preferenceValue struct {
+	Existed bool
+	Type    string
+	Value   string
+}
+
+type preferenceSpec struct {
+	Domain string
+	Key    string
+	Type   string
+	Value  string
+}
+
+func applyPreferences(journal *Journal, state *models.MigrationState, system System, dir string) error {
+	for _, spec := range preferenceSpecs(state) {
+		before, err := readPreference(system, spec.Domain, spec.Key)
+		if err != nil {
+			return err
+		}
+		record := PreferenceJournal{Domain: spec.Domain, Key: spec.Key, Existed: before.Existed, BeforeType: before.Type, BeforeValue: before.Value, AppliedType: spec.Type, AppliedValue: spec.Value, Applying: true}
+		journal.Preferences = append(journal.Preferences, record)
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+		if err := writePreference(system, spec.Domain, spec.Key, spec.Type, spec.Value); err != nil {
+			return err
+		}
+		journal.Preferences[len(journal.Preferences)-1].Applied = true
+		journal.Preferences[len(journal.Preferences)-1].Applying = false
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preferenceSpecs(state *models.MigrationState) []preferenceSpec {
+	prefs := state.Preferences
+	if preferencesEmpty(prefs) {
+		return nil
+	}
+	specs := []preferenceSpec{
+		{Domain: "com.apple.finder", Key: "AppleShowAllFiles", Type: "bool", Value: strconv.FormatBool(prefs.Finder.ShowHiddenFiles)},
+		{Domain: "com.apple.dock", Key: "autohide", Type: "bool", Value: strconv.FormatBool(prefs.Dock.Autohide)},
+		{Domain: "com.apple.dock", Key: "show-recents", Type: "bool", Value: strconv.FormatBool(prefs.Dock.ShowRecents)},
+	}
+	if prefs.Finder.DefaultViewMode != "" {
+		specs = append(specs, preferenceSpec{Domain: "com.apple.finder", Key: "FXPreferredViewStyle", Type: "string", Value: prefs.Finder.DefaultViewMode})
+	}
+	if prefs.Dock.Position != "" {
+		specs = append(specs, preferenceSpec{Domain: "com.apple.dock", Key: "orientation", Type: "string", Value: prefs.Dock.Position})
+	}
+	if prefs.Keyboard.KeyRepeat > 0 {
+		specs = append(specs, preferenceSpec{Domain: "-g", Key: "KeyRepeat", Type: "int", Value: strconv.Itoa(prefs.Keyboard.KeyRepeat)})
+	}
+	if prefs.Keyboard.InitialRepeat > 0 {
+		specs = append(specs, preferenceSpec{Domain: "-g", Key: "InitialKeyRepeat", Type: "int", Value: strconv.Itoa(prefs.Keyboard.InitialRepeat)})
+	}
+	return specs
+}
+
+func preferencesEmpty(prefs models.PreferencesGroup) bool {
+	return prefs.Finder == (models.FinderPrefs{}) && prefs.Dock.Position == "" && !prefs.Dock.Autohide && !prefs.Dock.ShowRecents && len(prefs.Dock.AppOrder) == 0 && len(prefs.Dock.PersistentApps) == 0 && prefs.Keyboard == (models.KeyboardPrefs{}) && prefs.Trackpad == (models.TrackpadPrefs{}) && prefs.System == (models.SystemPrefs{}) && len(prefs.Apps) == 0
+}
+
+func readPreference(system System, domain, key string) (preferenceValue, error) {
+	value, err := system.Output("defaults", "read", domain, key)
+	if err != nil {
+		return preferenceValue{}, nil
+	}
+	typeOutput, err := system.Output("defaults", "read-type", domain, key)
+	if err != nil {
+		return preferenceValue{}, err
+	}
+	kind := preferenceType(typeOutput)
+	return preferenceValue{Existed: true, Type: kind, Value: normalizePreference(kind, value)}, nil
+}
+
+func preferenceType(output string) string {
+	lower := strings.ToLower(output)
+	switch {
+	case strings.Contains(lower, "boolean"):
+		return "bool"
+	case strings.Contains(lower, "integer"):
+		return "int"
+	case strings.Contains(lower, "float"):
+		return "float"
+	default:
+		return "string"
+	}
+}
+
+func normalizePreference(kind, value string) string {
+	value = strings.TrimSpace(value)
+	if kind == "bool" {
+		return strconv.FormatBool(value == "1" || strings.EqualFold(value, "true"))
+	}
+	return value
+}
+
+func writePreference(system System, domain, key, kind, value string) error {
+	return system.Run("defaults", "write", domain, key, "-"+kind, value)
+}
+
+func applySystemSettings(journal *Journal, state *models.MigrationState, system System, dir string) error {
+	settings := []SystemJournal{
+		{Kind: "computer-name", AppliedValue: state.Preferences.System.ComputerName},
+		{Kind: "time-zone", AppliedValue: state.Preferences.System.TimeZone},
+		{Kind: "language", AppliedValue: state.Preferences.System.Language},
+	}
+	for _, record := range settings {
+		if record.AppliedValue == "" {
+			continue
+		}
+		before, err := readSystemSetting(system, record.Kind)
+		if err != nil {
+			return err
+		}
+		record.Before = before
+		record.Applying = true
+		journal.System = append(journal.System, record)
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+		if err := writeSystemSetting(system, record.Kind, record.AppliedValue); err != nil {
+			return err
+		}
+		journal.System[len(journal.System)-1].Applied = true
+		journal.System[len(journal.System)-1].Applying = false
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readSystemSetting(system System, kind string) (string, error) {
+	switch kind {
+	case "computer-name":
+		return system.Output("scutil", "--get", "ComputerName")
+	case "time-zone":
+		value, err := system.Output("readlink", "/etc/localtime")
+		const marker = "/zoneinfo/"
+		if index := strings.Index(value, marker); index >= 0 {
+			value = value[index+len(marker):]
+		}
+		return value, err
+	case "language":
+		value, err := system.Output("defaults", "read", "-g", "AppleLanguages")
+		return normalizeLanguage(value), err
+	default:
+		return "", fmt.Errorf("unsupported system setting: %s", kind)
+	}
+}
+
+func writeSystemSetting(system System, kind, value string) error {
+	switch kind {
+	case "computer-name":
+		return runAuthorized(system, "/usr/sbin/scutil", "--set", "ComputerName", value)
+	case "time-zone":
+		return runAuthorized(system, "/usr/sbin/systemsetup", "-settimezone", value)
+	case "language":
+		args := []string{"write", "-g", "AppleLanguages", "-array"}
+		args = append(args, strings.Split(value, ",")...)
+		return system.Run("defaults", args...)
+	default:
+		return fmt.Errorf("unsupported system setting: %s", kind)
+	}
+}
+
+func normalizeLanguage(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "() \n\t")
+	var languages []string
+	for _, language := range strings.Split(value, ",") {
+		language = strings.Trim(strings.TrimSpace(language), `"`)
+		if language != "" {
+			languages = append(languages, language)
+		}
+	}
+	return strings.Join(languages, ",")
+}
+
+func runAuthorized(system System, executable string, args ...string) error {
+	quoted := []string{shellQuote(executable)}
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	script := fmt.Sprintf(`do shell script %q with administrator privileges`, strings.Join(quoted, " "))
+	return system.Run("osascript", "-e", script)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func applyPackages(journal *Journal, state *models.MigrationState, system System, dir string) error {
+	for _, app := range state.Applications.Manual {
+		journal.Unresolved = append(journal.Unresolved, fmt.Sprintf("manual application: %s (%s)", app.Name, app.Path))
+	}
+	for _, pkg := range state.Applications.Homebrew {
+		if !validPackageName(pkg.Name) || (pkg.Type != "formula" && pkg.Type != "cask") {
+			return fmt.Errorf("invalid Homebrew package: %s", pkg.Name)
+		}
+		if _, installed, err := packageStatus(system, "homebrew", pkg.Name, pkg.Type); err != nil {
+			return fmt.Errorf("inspect Homebrew %s %s: %w", pkg.Type, pkg.Name, err)
+		} else if installed {
+			continue
+		}
+		record := PackageJournal{Manager: "homebrew", Name: pkg.Name, Type: pkg.Type, Applying: true}
+		journal.Packages = append(journal.Packages, record)
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+		args := []string{"install"}
+		if pkg.Type == "cask" {
+			args = append(args, "--cask")
+		}
+		if err := system.Run("brew", append(args, pkg.Name)...); err != nil {
+			return fmt.Errorf("install Homebrew %s %s: %w", pkg.Type, pkg.Name, err)
+		}
+		version, installed, err := packageStatus(system, "homebrew", pkg.Name, pkg.Type)
+		if err != nil || !installed {
+			return fmt.Errorf("verify Homebrew %s %s after install", pkg.Type, pkg.Name)
+		}
+		record = journal.Packages[len(journal.Packages)-1]
+		record.Applying, record.Applied, record.AppliedVersion = false, true, version
+		journal.Packages[len(journal.Packages)-1] = record
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+	}
+	for _, extension := range state.Applications.VSCodeExtensions {
+		if !validExtensionID(extension) {
+			return fmt.Errorf("invalid VS Code extension: %s", extension)
+		}
+		if _, installed, err := packageStatus(system, "vscode", extension, "extension"); err != nil {
+			return fmt.Errorf("inspect VS Code extension %s: %w", extension, err)
+		} else if installed {
+			continue
+		}
+		journal.Packages = append(journal.Packages, PackageJournal{Manager: "vscode", Name: extension, Type: "extension", Applying: true})
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+		if err := system.Run("code", "--install-extension", extension); err != nil {
+			return fmt.Errorf("install VS Code extension %s: %w", extension, err)
+		}
+		journal.Packages[len(journal.Packages)-1].Applied = true
+		journal.Packages[len(journal.Packages)-1].Applying = false
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+	}
+	for _, app := range state.Applications.AppStore {
+		if !regexp.MustCompile(`^[0-9]+$`).MatchString(app.BundleID) {
+			journal.Unresolved = append(journal.Unresolved, fmt.Sprintf("App Store application: %s (invalid mas ID %s)", app.Name, app.BundleID))
+			continue
+		}
+		if _, installed, err := packageStatus(system, "mas", app.BundleID, "app-store"); err != nil {
+			return fmt.Errorf("inspect App Store application %s: %w", app.Name, err)
+		} else if installed {
+			continue
+		}
+		journal.Packages = append(journal.Packages, PackageJournal{Manager: "mas", Name: app.BundleID, Type: "app-store", Applying: true})
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+		if err := system.Run("mas", "install", app.BundleID); err != nil {
+			return fmt.Errorf("install App Store application %s: %w", app.Name, err)
+		}
+		journal.Packages[len(journal.Packages)-1].Applied = true
+		journal.Packages[len(journal.Packages)-1].Applying = false
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
+	}
+	return saveJournal(dir, journal)
+}
+
+var packageName = regexp.MustCompile(`^[A-Za-z0-9@+_.-]+(?:/[A-Za-z0-9@+_.-]+)*$`)
+var extensionID = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+$`)
+
+func validPackageName(value string) bool { return packageName.MatchString(value) }
+func validExtensionID(value string) bool { return extensionID.MatchString(value) }
+
+func packageStatus(system System, manager, name, kind string) (string, bool, error) {
+	switch manager {
+	case "vscode":
+		output, err := system.Output("code", "--list-extensions")
+		if err != nil {
+			return "", false, err
+		}
+		for _, extension := range strings.Split(output, "\n") {
+			if strings.EqualFold(strings.TrimSpace(extension), name) {
+				return "", true, nil
+			}
+		}
+		return "", false, nil
+	case "mas":
+		output, err := system.Output("mas", "list")
+		if err != nil {
+			return "", false, err
+		}
+		return "", strings.HasPrefix(output, name+" ") || strings.Contains(output, "\n"+name+" "), nil
+	default:
+		args := []string{"list", "--formula"}
+		if kind == "cask" {
+			args = []string{"list", "--cask"}
+		}
+		output, err := system.Output("brew", args...)
+		if err != nil {
+			return "", false, err
+		}
+		for _, installed := range strings.Fields(output) {
+			if installed == name {
+				return name, true, nil
+			}
+		}
+		return "", false, nil
+	}
 }
 
 func swapInFile(destination string, record FileJournal, transactionDir string) error {
@@ -672,6 +1367,9 @@ func renamePaths(first, second string, flags uintptr) error {
 
 func countPreferences(state *models.MigrationState) int {
 	prefs := state.Preferences
+	if preferencesEmpty(prefs) {
+		return 0
+	}
 	count := 3 // Finder hidden files, Dock autohide, Dock recents.
 	if prefs.Finder.DefaultViewMode != "" {
 		count++
@@ -683,6 +1381,15 @@ func countPreferences(state *models.MigrationState) int {
 		count++
 	}
 	if prefs.Keyboard.InitialRepeat > 0 {
+		count++
+	}
+	if prefs.System.ComputerName != "" {
+		count++
+	}
+	if prefs.System.TimeZone != "" {
+		count++
+	}
+	if prefs.System.Language != "" {
 		count++
 	}
 	return count
@@ -791,7 +1498,7 @@ func loadJournal(dir string) (*Journal, error) {
 		}
 		journal = migrated
 	}
-	if journal.Version != 1 {
+	if journal.Version != 1 && journal.Version != 2 {
 		return nil, fmt.Errorf("unsupported transaction journal version")
 	}
 	if err := validateJournal(dir, journal); err != nil {
@@ -897,12 +1604,85 @@ func validateJournal(dir string, journal *Journal) error {
 			}
 		}
 	}
+	if journal.Version == 1 && (len(journal.Preferences) > 0 || len(journal.Packages) > 0 || len(journal.System) > 0 || len(journal.Unresolved) > 0 || len(journal.RetainedApplications) > 0) {
+		return fmt.Errorf("version 1 journal contains unsupported state")
+	}
+	if journal.Version == 2 {
+		if err := validatePreferenceJournals(journal.Preferences); err != nil {
+			return err
+		}
+		if err := validatePackageJournals(journal.Packages); err != nil {
+			return err
+		}
+		if err := validateSystemJournals(journal.System); err != nil {
+			return err
+		}
+		seenRetained := make(map[string]bool)
+		for _, retained := range journal.RetainedApplications {
+			if retained == "" || seenRetained[retained] {
+				return fmt.Errorf("invalid retained application journal")
+			}
+			seenRetained[retained] = true
+		}
+	}
 	return nil
 }
 
 func immediateJournalDotfile(path string) bool {
 	clean := filepath.Clean(filepath.FromSlash(path))
 	return !filepath.IsAbs(clean) && bundle.VettedDotfile(clean)
+}
+
+func validatePreferenceJournals(items []PreferenceJournal) error {
+	allowed := make(map[string]bool)
+	for _, spec := range preferenceSpecs(&models.MigrationState{}) {
+		allowed[spec.Domain+":"+spec.Key] = true
+	}
+	// Empty state suppresses defaults, so enumerate the fixed writable keys.
+	for _, key := range []string{"com.apple.finder:AppleShowAllFiles", "com.apple.finder:FXPreferredViewStyle", "com.apple.dock:autohide", "com.apple.dock:show-recents", "com.apple.dock:orientation", "-g:KeyRepeat", "-g:InitialKeyRepeat"} {
+		allowed[key] = true
+	}
+	seen := make(map[string]bool)
+	for _, item := range items {
+		key := item.Domain + ":" + item.Key
+		if !allowed[key] || seen[key] || !validPreferenceType(item.AppliedType) || item.AppliedValue == "" || item.Applied && item.Applying || item.RolledBack && item.RollingBack {
+			return fmt.Errorf("invalid preference journal")
+		}
+		if item.Existed && !validPreferenceType(item.BeforeType) {
+			return fmt.Errorf("invalid preference before state")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func validatePackageJournals(items []PackageJournal) error {
+	seen := make(map[string]bool)
+	for _, item := range items {
+		key := item.Manager + ":" + item.Name
+		valid := item.Manager == "homebrew" && (item.Type == "formula" || item.Type == "cask") && validPackageName(item.Name) || item.Manager == "vscode" && item.Type == "extension" && validExtensionID(item.Name) || item.Manager == "mas" && item.Type == "app-store" && regexp.MustCompile(`^[0-9]+$`).MatchString(item.Name)
+		validLifecycle := !item.RollingBack && (item.Applying && !item.Applied && !item.RolledBack || !item.Applying && item.Applied || !item.Applying && !item.Applied && item.RolledBack)
+		if !valid || seen[key] || !validLifecycle {
+			return fmt.Errorf("invalid package journal")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func validateSystemJournals(items []SystemJournal) error {
+	seen := make(map[string]bool)
+	for _, item := range items {
+		if (item.Kind != "computer-name" && item.Kind != "time-zone" && item.Kind != "language") || seen[item.Kind] || item.Before == "" || item.AppliedValue == "" || item.Applied && item.Applying || item.RolledBack && item.RollingBack {
+			return fmt.Errorf("invalid system journal")
+		}
+		seen[item.Kind] = true
+	}
+	return nil
+}
+
+func validPreferenceType(kind string) bool {
+	return kind == "bool" || kind == "int" || kind == "float" || kind == "string"
 }
 
 func validHash(value string) bool {

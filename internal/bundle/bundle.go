@@ -35,6 +35,11 @@ var vettedDotfiles = map[string]bool{
 	".gitconfig": true, ".vimrc": true, ".tmux.conf": true, ".editorconfig": true,
 	".prettierrc": true, ".eslintrc.json": true, ".gitignore_global": true,
 }
+var packageName = regexp.MustCompile(`^[A-Za-z0-9@+_.][A-Za-z0-9@+_.-]*(?:/[A-Za-z0-9@+_.-]+)*$`)
+var extensionID = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+$`)
+var appStoreID = regexp.MustCompile(`^[0-9]+$`)
+var timeZone = regexp.MustCompile(`^[A-Za-z0-9_+.-]+(?:/[A-Za-z0-9_+.-]+)*$`)
+var language = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*(?:,[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*)*$`)
 
 // Manifest describes the portable contents of a .wave archive.
 type Manifest struct {
@@ -302,7 +307,40 @@ func Open(path string) (*Bundle, error) {
 			return nil, fmt.Errorf("bundle payloads exceed maximum size")
 		}
 	}
+	if err := validateMigrationState(bundle.Manifest.State); err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
 	return bundle, nil
+}
+
+func validateMigrationState(state *models.MigrationState) error {
+	for _, pkg := range state.Applications.Homebrew {
+		if !packageName.MatchString(pkg.Name) || pkg.Type != "formula" && pkg.Type != "cask" {
+			return fmt.Errorf("invalid Homebrew package: %s", pkg.Name)
+		}
+	}
+	for _, extension := range state.Applications.VSCodeExtensions {
+		if !extensionID.MatchString(extension) {
+			return fmt.Errorf("invalid VS Code extension: %s", extension)
+		}
+	}
+	for _, app := range state.Applications.AppStore {
+		if !appStoreID.MatchString(app.BundleID) {
+			return fmt.Errorf("invalid App Store ID: %s", app.BundleID)
+		}
+	}
+	settings := state.Preferences.System
+	if strings.ContainsAny(settings.ComputerName, "\r\n\x00") || len(settings.ComputerName) > 255 {
+		return fmt.Errorf("invalid computer name")
+	}
+	if settings.TimeZone != "" && !timeZone.MatchString(settings.TimeZone) {
+		return fmt.Errorf("invalid time zone")
+	}
+	if settings.Language != "" && !language.MatchString(settings.Language) {
+		return fmt.Errorf("invalid language list")
+	}
+	return nil
 }
 
 func unsafeArchivePath(path string) bool {
@@ -351,13 +389,19 @@ func FormatSummary(b *Bundle) string {
 	homebrew := b.Manifest.State.Applications.Homebrew
 	extensions := b.Manifest.State.Applications.VSCodeExtensions
 	if len(homebrew)+len(extensions) > 0 {
-		summary.WriteString("\nApplications (preview-only):\n")
+		summary.WriteString("\nApplications:\n")
 		for _, application := range homebrew {
 			fmt.Fprintf(&summary, "- Homebrew: %s (%s)\n", application.Name, application.Type)
 		}
 		for _, extension := range extensions {
 			fmt.Fprintf(&summary, "- VS Code: %s\n", extension)
 		}
+	}
+	for _, application := range b.Manifest.State.Applications.AppStore {
+		fmt.Fprintf(&summary, "- App Store: %s (%s)\n", application.Name, application.BundleID)
+	}
+	for _, application := range b.Manifest.State.Applications.Manual {
+		fmt.Fprintf(&summary, "- Manual installation required: %s (%s)\n", application.Name, application.Path)
 	}
 	if b.Manifest.Excluded > 0 {
 		fmt.Fprintf(&summary, "\nExcluded during capture: %d\n", b.Manifest.Excluded)

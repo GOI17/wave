@@ -317,7 +317,7 @@ func TestQuarantineRejectsLockFile(t *testing.T) {
 func TestCanonicalApplyAndRollbackSummaries(t *testing.T) {
 	journal := &transaction.Journal{ID: "tx-123", Files: []transaction.FileJournal{{Destination: ".zshrc"}, {Destination: ".vimrc"}}}
 	applySummary := transaction.FormatApplySummary(journal)
-	if !strings.Contains(applySummary, "Transaction: tx-123") || !strings.Contains(applySummary, "Root dotfiles applied: 2") || !strings.Contains(applySummary, "- .zshrc") || !strings.Contains(applySummary, "- .vimrc") || !strings.Contains(applySummary, "Applications: preview-only") {
+	if !strings.Contains(applySummary, "Transaction: tx-123") || !strings.Contains(applySummary, "Root dotfiles applied: 2") || !strings.Contains(applySummary, "- .zshrc") || !strings.Contains(applySummary, "- .vimrc") || !strings.Contains(applySummary, "Applications installed: 0") {
 		t.Fatalf("apply summary = %q", applySummary)
 	}
 	rollbackSummary := transaction.FormatRollbackSummary(&transaction.RollbackResult{TransactionID: "tx-123", Restored: 1, Conflicts: 1, ConflictPaths: []string{".zshrc"}})
