@@ -63,24 +63,31 @@ func Create(path, homeDir string, state *models.MigrationState) error {
 		return err
 	}
 
-	manifest := Manifest{FormatVersion: formatVersion, State: state, Files: []File{}}
+	portableState := *state
+	portableState.Dotfiles = models.DotfilesGroup{Files: []models.DotfileEntry{}, Directories: []models.DirEntry{}}
+	portableState.Environment = models.EnvironmentGroup{}
+	manifest := Manifest{FormatVersion: formatVersion, State: &portableState, Files: []File{}}
 	writer := zip.NewWriter(tempFile)
+	writtenPayloads := make(map[string]bool)
 	for _, entry := range state.Dotfiles.Files {
 		file, data, ok := collectFile(homeDir, entry.Source)
 		if !ok {
 			manifest.Excluded++
 			continue
 		}
-		payload, err := writer.Create(file.Payload)
-		if err != nil {
-			_ = writer.Close()
-			_ = tempFile.Close()
-			return err
-		}
-		if _, err := payload.Write(data); err != nil {
-			_ = writer.Close()
-			_ = tempFile.Close()
-			return err
+		if !writtenPayloads[file.Payload] {
+			payload, err := writer.Create(file.Payload)
+			if err != nil {
+				_ = writer.Close()
+				_ = tempFile.Close()
+				return err
+			}
+			if _, err := payload.Write(data); err != nil {
+				_ = writer.Close()
+				_ = tempFile.Close()
+				return err
+			}
+			writtenPayloads[file.Payload] = true
 		}
 		manifest.Files = append(manifest.Files, file)
 	}

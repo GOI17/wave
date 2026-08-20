@@ -94,7 +94,11 @@ func TestCreateExcludesSensitiveAndUnsafeFiles(t *testing.T) {
 	for _, path := range paths {
 		entries = append(entries, models.DotfileEntry{Source: path, Destination: path})
 	}
-	state := &models.MigrationState{Version: "1.0.0", Dotfiles: models.DotfilesGroup{Files: entries}}
+	state := &models.MigrationState{
+		Version:     "1.0.0",
+		Dotfiles:    models.DotfilesGroup{Files: entries},
+		Environment: models.EnvironmentGroup{EnvironmentVars: map[string]string{"API_TOKEN": "secret-value"}},
+	}
 	bundlePath := filepath.Join(t.TempDir(), "device.wave")
 
 	if err := bundle.Create(bundlePath, homeDir, state); err != nil {
@@ -111,5 +115,35 @@ func TestCreateExcludesSensitiveAndUnsafeFiles(t *testing.T) {
 	}
 	if opened.Manifest.Excluded != len(paths) {
 		t.Fatalf("excluded = %d, want %d", opened.Manifest.Excluded, len(paths))
+	}
+	if len(opened.Manifest.State.Dotfiles.Files) != 0 || len(opened.Manifest.State.Environment.EnvironmentVars) != 0 {
+		t.Fatalf("portable state retained sensitive path/environment metadata: %#v", opened.Manifest.State)
+	}
+}
+
+func TestCreateDeduplicatesIdenticalPayloads(t *testing.T) {
+	homeDir := t.TempDir()
+	var entries []models.DotfileEntry
+	for _, name := range []string{"one", "two"} {
+		path := filepath.Join(homeDir, ".config", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("same"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, models.DotfileEntry{Source: path})
+	}
+	bundlePath := filepath.Join(t.TempDir(), "device.wave")
+	if err := bundle.Create(bundlePath, homeDir, &models.MigrationState{Version: "1.0.0", Dotfiles: models.DotfilesGroup{Files: entries}}); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := bundle.Open(bundlePath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer opened.Close()
+	if len(opened.Manifest.Files) != 2 || opened.Manifest.Files[0].Payload != opened.Manifest.Files[1].Payload {
+		t.Fatalf("files = %#v, want shared payload", opened.Manifest.Files)
 	}
 }

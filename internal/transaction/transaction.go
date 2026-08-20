@@ -47,6 +47,7 @@ type PackageJournal struct {
 	Name           string `json:"name"`
 	Type           string `json:"type"`
 	AppliedVersion string `json:"applied_version,omitempty"`
+	Applied        bool   `json:"applied"`
 	RolledBack     bool   `json:"rolled_back"`
 }
 
@@ -55,6 +56,7 @@ type FileJournal struct {
 	Destination string      `json:"destination"`
 	Existed     bool        `json:"existed"`
 	Before      string      `json:"before,omitempty"`
+	BeforeHash  string      `json:"before_hash,omitempty"`
 	BeforeMode  os.FileMode `json:"before_mode,omitempty"`
 	AppliedHash string      `json:"applied_hash"`
 	AppliedMode os.FileMode `json:"applied_mode"`
@@ -70,6 +72,62 @@ type RollbackResult struct {
 	ConflictPaths       []string `json:"conflict_paths"`
 	PreferencesRestored int      `json:"preferences_restored"`
 	PackagesRemoved     int      `json:"packages_removed"`
+}
+
+// Preview returns a non-mutating summary of a portable bundle.
+func Preview(bundlePath string) (*models.MigrationResult, error) {
+	opened, err := bundle.Open(bundlePath)
+	if err != nil {
+		return nil, err
+	}
+	defer opened.Close()
+	state := opened.Manifest.State
+	result := &models.MigrationResult{DryRun: true, Warnings: []string{}}
+	addPreviewCategory(result, "Applications", len(state.Applications.Homebrew)+len(state.Applications.VSCodeExtensions), 0)
+	addPreviewCategory(result, "Dotfiles", len(opened.Manifest.Files), 0)
+	preferenceCount := len(preferenceSpecs(state))
+	addPreviewCategory(result, "Preferences", preferenceCount, 0)
+	addPreviewCategory(result, "Environment", 0, 0)
+	if opened.Manifest.Excluded > 0 {
+		result.Skipped += opened.Manifest.Excluded
+		result.Total += opened.Manifest.Excluded
+		result.Categories[1].Skipped += opened.Manifest.Excluded
+		result.Categories[1].Total += opened.Manifest.Excluded
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d sensitive, unsafe, unavailable, or oversized files were excluded from capture", opened.Manifest.Excluded))
+	}
+	return result, nil
+}
+
+func addPreviewCategory(result *models.MigrationResult, name string, ready, skipped int) {
+	result.Categories = append(result.Categories, models.MigrationCategoryResult{Name: name, Total: ready + skipped, Successful: ready, Skipped: skipped})
+	result.Total += ready + skipped
+	result.Successful += ready
+	result.Skipped += skipped
+}
+
+// Latest returns the latest transaction that can still be rolled back.
+func Latest(transactionsDir string) (*Journal, error) {
+	entries, err := os.ReadDir(transactionsDir)
+	if err != nil {
+		return nil, err
+	}
+	var latest *Journal
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		journal, err := loadJournal(filepath.Join(transactionsDir, entry.Name()))
+		if err != nil || (journal.Status != "applied" && journal.Status != "rollback-conflicts" && journal.Status != "partial") {
+			continue
+		}
+		if latest == nil || journal.CreatedAt.After(latest.CreatedAt) {
+			latest = journal
+		}
+	}
+	if latest == nil {
+		return nil, fmt.Errorf("no rollback transaction is available")
+	}
+	return latest, nil
 }
 
 // System runs platform commands used by preference and package transactions.
@@ -118,11 +176,11 @@ func ApplyWithSystem(bundlePath, homeDir, transactionsDir string, system System)
 	for i, file := range opened.Manifest.Files {
 		destination, err := destinationPath(homeDir, file.Destination)
 		if err != nil {
-			return journal, err
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		data, err := opened.ReadFile(file)
 		if err != nil {
-			return journal, err
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		record := FileJournal{
 			Destination: file.Destination,
@@ -131,27 +189,29 @@ func ApplyWithSystem(bundlePath, homeDir, transactionsDir string, system System)
 		}
 		if info, err := os.Stat(destination); err == nil {
 			if !info.Mode().IsRegular() {
-				return journal, fmt.Errorf("destination is not a regular file: %s", destination)
+				return recoverPartial(journal, homeDir, dir, system, fmt.Errorf("destination is not a regular file: %s", destination))
 			}
 			record.Existed = true
 			record.BeforeMode = info.Mode().Perm()
 			record.Before = filepath.ToSlash(filepath.Join("before", fmt.Sprintf("%06d", i)))
 			beforeData, err := os.ReadFile(destination)
 			if err != nil {
-				return journal, err
+				return recoverPartial(journal, homeDir, dir, system, err)
 			}
+			beforeHash := sha256.Sum256(beforeData)
+			record.BeforeHash = hex.EncodeToString(beforeHash[:])
 			if err := writeAtomic(filepath.Join(dir, filepath.FromSlash(record.Before)), beforeData, 0600); err != nil {
-				return journal, err
+				return recoverPartial(journal, homeDir, dir, system, err)
 			}
 		} else if !os.IsNotExist(err) {
-			return journal, err
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		journal.Files = append(journal.Files, record)
 		if err := saveJournal(dir, journal); err != nil {
-			return journal, err
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
-			return journal, err
+			return recoverPartial(journal, homeDir, dir, system, err)
 		}
 		if err := writeAtomic(destination, data, file.Mode); err != nil {
 			journal.Status = "partial"
@@ -202,6 +262,18 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 			continue
 		}
 		version, installed := packageVersion(system, record.Manager, record.Name, record.Type)
+		if !record.Applied {
+			if !installed {
+				record.RolledBack = true
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+			result.Conflicts++
+			result.ConflictPaths = append(result.ConflictPaths, "package:"+record.Name)
+			continue
+		}
 		if !installed || (record.AppliedVersion != "" && version != record.AppliedVersion) {
 			result.Conflicts++
 			result.ConflictPaths = append(result.ConflictPaths, "package:"+record.Name)
@@ -222,6 +294,13 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 			continue
 		}
 		current, err := readPreference(system, record.Domain, record.Key)
+		if err == nil && current.Existed == record.Existed && (!current.Existed || (current.Type == record.BeforeType && current.Value == record.BeforeValue)) {
+			record.RolledBack = true
+			if err := saveJournal(dir, journal); err != nil {
+				return result, err
+			}
+			continue
+		}
 		if err != nil || !current.Existed || current.Type != record.AppliedType || current.Value != record.AppliedValue {
 			result.Conflicts++
 			result.ConflictPaths = append(result.ConflictPaths, "preference:"+record.Domain+":"+record.Key)
@@ -250,6 +329,20 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 			return result, err
 		}
 		currentHash, currentMode, err := fileState(destination)
+		if err == nil && record.Existed && currentHash == record.BeforeHash && currentMode == record.BeforeMode {
+			record.RolledBack = true
+			if err := saveJournal(dir, journal); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if os.IsNotExist(err) && !record.Existed {
+			record.RolledBack = true
+			if err := saveJournal(dir, journal); err != nil {
+				return result, err
+			}
+			continue
+		}
 		if err != nil || currentHash != record.AppliedHash || currentMode != record.AppliedMode {
 			result.Conflicts++
 			result.ConflictPaths = append(result.ConflictPaths, record.Destination)
@@ -398,11 +491,17 @@ func applyPackages(journal *Journal, state *models.MigrationState, system System
 			args = append(args, "--cask")
 		}
 		args = append(args, pkg.Name)
+		journal.Packages = append(journal.Packages, PackageJournal{Manager: "homebrew", Name: pkg.Name, Type: pkg.Type})
+		record := &journal.Packages[len(journal.Packages)-1]
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
 		if err := system.Run("brew", args...); err != nil {
 			return err
 		}
 		version, _ := packageVersion(system, "homebrew", pkg.Name, pkg.Type)
-		journal.Packages = append(journal.Packages, PackageJournal{Manager: "homebrew", Name: pkg.Name, Type: pkg.Type, AppliedVersion: version})
+		record.Applied = true
+		record.AppliedVersion = version
 		if err := saveJournal(dir, journal); err != nil {
 			return err
 		}
@@ -411,10 +510,15 @@ func applyPackages(journal *Journal, state *models.MigrationState, system System
 		if _, installed := packageVersion(system, "vscode", extension, "extension"); installed {
 			continue
 		}
+		journal.Packages = append(journal.Packages, PackageJournal{Manager: "vscode", Name: extension, Type: "extension"})
+		record := &journal.Packages[len(journal.Packages)-1]
+		if err := saveJournal(dir, journal); err != nil {
+			return err
+		}
 		if err := system.Run("code", "--install-extension", extension); err != nil {
 			return err
 		}
-		journal.Packages = append(journal.Packages, PackageJournal{Manager: "vscode", Name: extension, Type: "extension"})
+		record.Applied = true
 		if err := saveJournal(dir, journal); err != nil {
 			return err
 		}

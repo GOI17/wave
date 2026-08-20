@@ -10,16 +10,19 @@ import (
 	"wave/internal/analyzer"
 	"wave/internal/executor"
 	"wave/internal/migrator"
+	"wave/internal/transaction"
 	"wave/ui/gui"
 	"wave/ui/tui"
 )
 
 var (
-	outputPath string
-	inputPath  string
-	format     string
-	dryRun     bool
-	startGUI   = gui.StartGUI
+	outputPath    string
+	inputPath     string
+	format        string
+	dryRun        bool
+	confirm       bool
+	transactionID string
+	startGUI      = gui.StartGUI
 	// Version is overridden with release build flags.
 	Version = "1.0.3"
 )
@@ -46,7 +49,7 @@ var captureCmd = &cobra.Command{
 		}
 
 		if outputPath == "" {
-			outputPath = filepath.Join(homeDir, "wave-state.yaml")
+			outputPath = filepath.Join(homeDir, "wave-state.wave")
 		}
 
 		// Show progress
@@ -58,17 +61,23 @@ var captureCmd = &cobra.Command{
 		mig := migrator.NewMigrator(analyzer, executor)
 
 		fmt.Println("📦 Analyzing device...")
-		if err := mig.Capture(outputPath, format); err != nil {
-			return fmt.Errorf("capture failed: %w", err)
+		var captureErr error
+		if strings.EqualFold(filepath.Ext(outputPath), ".wave") {
+			captureErr = mig.CaptureBundle(outputPath, homeDir)
+		} else {
+			captureErr = mig.Capture(outputPath, format)
+		}
+		if captureErr != nil {
+			return fmt.Errorf("capture failed: %w", captureErr)
 		}
 
 		fmt.Println("\n✅ Device state captured successfully!")
 		fmt.Printf("📁 State file: %s\n", outputPath)
 		fmt.Println("\nNext steps:")
-		fmt.Println("  • Review the captured state: cat " + outputPath)
-		fmt.Println("  • Transfer to target machine")
-		fmt.Println("  • Run: wave apply --input " + filepath.Base(outputPath) + " --dry-run")
-		fmt.Println("  • Then: wave apply --input " + filepath.Base(outputPath))
+		fmt.Println("  • Keep the archive private; it contains configuration file contents")
+		fmt.Println("  • Transfer the .wave archive to the target machine")
+		fmt.Println("  • Preview: wave apply --input " + filepath.Base(outputPath) + " --dry-run")
+		fmt.Println("  • Apply: wave apply --input " + filepath.Base(outputPath) + " --confirm")
 
 		return nil
 	},
@@ -82,7 +91,7 @@ var applyCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if inputPath == "" {
 			homeDir, _ := os.UserHomeDir()
-			inputPath = filepath.Join(homeDir, "wave-state.yaml")
+			inputPath = filepath.Join(homeDir, "wave-state.wave")
 		}
 
 		// Check if file exists
@@ -104,18 +113,77 @@ var applyCmd = &cobra.Command{
 			fmt.Println("⚡ Mode: LIVE (changes will be applied)")
 		}
 
-		analyzer := analyzer.NewMacOSAnalyzer(homeDir)
-		executor := executor.NewMacOSExecutor(homeDir, dryRun)
-		mig := migrator.NewMigrator(analyzer, executor)
-
-		result, err := mig.Apply(inputPath, dryRun, format)
-		if result != nil {
-			fmt.Print("\n" + migrator.FormatSummary(result))
+		if dryRun {
+			if strings.EqualFold(filepath.Ext(inputPath), ".wave") {
+				result, err := transaction.Preview(inputPath)
+				if err != nil {
+					return fmt.Errorf("preview failed: %w", err)
+				}
+				fmt.Print("\n" + migrator.FormatSummary(result))
+				return nil
+			}
+			return runLegacyPreview(inputPath, homeDir)
 		}
+
+		if !strings.EqualFold(filepath.Ext(inputPath), ".wave") {
+			return fmt.Errorf("live apply requires a portable .wave archive")
+		}
+		if !confirm {
+			return fmt.Errorf("live apply requires --confirm after reviewing --dry-run output")
+		}
+		journal, err := transaction.Apply(inputPath, homeDir, filepath.Join(homeDir, ".wave", "transactions"))
 		if err != nil {
 			return fmt.Errorf("apply failed: %w", err)
 		}
+		fmt.Printf("Migration applied. Transaction: %s\n", journal.ID)
+		fmt.Printf("Rollback with: wave rollback --transaction %s\n", journal.ID)
+		return nil
+	},
+}
 
+func runLegacyPreview(path, homeDir string) error {
+	analyzer := analyzer.NewMacOSAnalyzer(homeDir)
+	executor := executor.NewMacOSExecutor(homeDir, true)
+	mig := migrator.NewMigrator(analyzer, executor)
+	result, err := mig.Apply(path, true, format)
+	if result != nil {
+		fmt.Print("\n" + migrator.FormatSummary(result))
+	}
+	if err != nil {
+		return fmt.Errorf("preview failed: %w", err)
+	}
+	return nil
+}
+
+var rollbackCmd = &cobra.Command{
+	Use:   "rollback",
+	Short: "Rollback an applied migration transaction",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		transactionsDir := filepath.Join(homeDir, ".wave", "transactions")
+		id := transactionID
+		if id == "" {
+			latest, err := transaction.Latest(transactionsDir)
+			if err != nil {
+				return err
+			}
+			id = latest.ID
+		}
+		result, err := transaction.Rollback(id, homeDir, transactionsDir)
+		if err != nil {
+			return fmt.Errorf("rollback failed: %w", err)
+		}
+		fmt.Printf("Rollback %s: %d files restored, %d files removed, %d preferences restored, %d packages removed, %d conflicts\n",
+			result.TransactionID, result.Restored, result.Removed, result.PreferencesRestored, result.PackagesRemoved, result.Conflicts)
+		if result.Conflicts > 0 {
+			fmt.Println("Conflicts were preserved and require manual resolution:")
+			for _, path := range result.ConflictPaths {
+				fmt.Println("- " + path)
+			}
+		}
 		return nil
 	},
 }
@@ -183,11 +251,13 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&format, "format", "yaml", "Output format: yaml or json")
 
 	// Capture command flags
-	captureCmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output file path (default: ~/wave-state.yaml)")
+	captureCmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output file path (default: ~/wave-state.wave)")
 
 	// Apply command flags
-	applyCmd.Flags().StringVarP(&inputPath, "input", "i", "", "Input state file path (default: ~/wave-state.yaml)")
+	applyCmd.Flags().StringVarP(&inputPath, "input", "i", "", "Input state file path (default: ~/wave-state.wave)")
 	applyCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without applying them")
+	applyCmd.Flags().BoolVar(&confirm, "confirm", false, "Confirm live apply of a portable .wave archive")
+	rollbackCmd.Flags().StringVar(&transactionID, "transaction", "", "Transaction ID (default: latest eligible transaction)")
 
 	// Verify command flags
 	verifyCmd.Flags().StringVarP(&inputPath, "input", "i", "", "Input state file path")
@@ -198,6 +268,7 @@ func init() {
 	// Add commands to root
 	RootCmd.AddCommand(captureCmd)
 	RootCmd.AddCommand(applyCmd)
+	RootCmd.AddCommand(rollbackCmd)
 	RootCmd.AddCommand(verifyCmd)
 	RootCmd.AddCommand(diffCmd)
 	RootCmd.AddCommand(tuiCmd)

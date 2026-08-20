@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"wave/internal/analyzer"
+	"wave/internal/bundle"
 	"wave/internal/executor"
 	"wave/internal/models"
 )
@@ -28,42 +29,61 @@ func NewMigrator(analyzer analyzer.Analyzer, executor executor.Executor) *Migrat
 
 // Capture collects device state and saves to file
 func (m *Migrator) Capture(outputPath string, format string) error {
+	state, err := m.Analyze()
+	if err != nil {
+		return err
+	}
+
+	// Save to file
+	return m.saveState(state, outputPath, format)
+}
+
+// Analyze collects current device state without writing it.
+func (m *Migrator) Analyze() (*models.MigrationState, error) {
 	// Capture device info
 	state, err := m.analyzer.AnalyzeDevice()
 	if err != nil {
-		return fmt.Errorf("failed to analyze device: %w", err)
+		return nil, fmt.Errorf("failed to analyze device: %w", err)
 	}
 
 	// Capture applications
 	apps, err := m.analyzer.AnalyzeApplications()
 	if err != nil {
-		return fmt.Errorf("failed to analyze applications: %w", err)
+		return nil, fmt.Errorf("failed to analyze applications: %w", err)
 	}
 	state.Applications = *apps
 
 	// Capture dotfiles
 	dotfiles, err := m.analyzer.AnalyzeDotfiles()
 	if err != nil {
-		return fmt.Errorf("failed to analyze dotfiles: %w", err)
+		return nil, fmt.Errorf("failed to analyze dotfiles: %w", err)
 	}
 	state.Dotfiles = *dotfiles
 
 	// Capture preferences
 	prefs, err := m.analyzer.AnalyzePreferences()
 	if err != nil {
-		return fmt.Errorf("failed to analyze preferences: %w", err)
+		return nil, fmt.Errorf("failed to analyze preferences: %w", err)
 	}
 	state.Preferences = *prefs
 
 	// Capture environment
 	env, err := m.analyzer.AnalyzeEnvironment()
 	if err != nil {
-		return fmt.Errorf("failed to analyze environment: %w", err)
+		return nil, fmt.Errorf("failed to analyze environment: %w", err)
 	}
 	state.Environment = *env
 
-	// Save to file
-	return m.saveState(state, outputPath, format)
+	return state, nil
+}
+
+// CaptureBundle writes a portable .wave archive including safe file contents.
+func (m *Migrator) CaptureBundle(outputPath, homeDir string) error {
+	state, err := m.Analyze()
+	if err != nil {
+		return err
+	}
+	return bundle.Create(outputPath, homeDir, state)
 }
 
 // Apply loads state from file and applies to target device.
