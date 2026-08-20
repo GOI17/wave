@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -65,6 +66,17 @@ type Bundle struct {
 	entries  map[string]*zip.File
 }
 
+// Inventory is the interface-neutral migration plan contained in an archive.
+type Inventory struct {
+	Groups []InventoryGroup `json:"groups"`
+}
+
+type InventoryGroup struct {
+	Name           string   `json:"name"`
+	WillMigrate    []string `json:"will_migrate"`
+	WillNotMigrate []string `json:"will_not_migrate"`
+}
+
 // Create writes a portable migration archive with mode 0600.
 func Create(path, homeDir string, state *models.MigrationState) error {
 	if state == nil {
@@ -91,6 +103,9 @@ func Create(path, homeDir string, state *models.MigrationState) error {
 		file, data, ok := collectFile(homeDir, entry.Source)
 		if !ok {
 			manifest.Excluded++
+			if relative, err := filepath.Rel(homeDir, entry.Source); err == nil && !unsafePath(relative) && !sensitivePath(relative) {
+				portableState.Dotfiles.Files = append(portableState.Dotfiles.Files, models.DotfileEntry{Source: filepath.ToSlash(relative), Destination: filepath.ToSlash(relative)})
+			}
 			continue
 		}
 		if !writtenPayloads[file.Payload] {
@@ -110,6 +125,7 @@ func Create(path, homeDir string, state *models.MigrationState) error {
 		manifest.Files = append(manifest.Files, file)
 	}
 
+	manifest.State = &portableState
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		_ = writer.Close()
@@ -375,38 +391,108 @@ func (b *Bundle) ReadFile(file File) ([]byte, error) {
 
 // FormatSummary renders a human-readable inventory of a validated archive.
 func FormatSummary(b *Bundle) string {
-	var summary strings.Builder
-	summary.WriteString("Portable Archive Contents\n")
-	summary.WriteString("=========================\n")
-	if len(b.Manifest.Files) == 0 {
-		summary.WriteString("Root dotfiles: none\n")
-	} else {
-		summary.WriteString("Root dotfiles:\n")
-		for _, file := range b.Manifest.Files {
-			fmt.Fprintf(&summary, "- %s (%d bytes, mode %04o)\n", file.Destination, file.Size, file.Mode.Perm())
-		}
+	return FormatInventory(BuildInventory(b))
+}
+
+// BuildInventory groups archive contents for CLI, TUI, and GUI rendering.
+func BuildInventory(b *Bundle) Inventory {
+	applications := InventoryGroup{Name: "Applications", WillMigrate: []string{}, WillNotMigrate: []string{}}
+	for _, application := range b.Manifest.State.Applications.Homebrew {
+		applications.WillMigrate = append(applications.WillMigrate, fmt.Sprintf("Homebrew %s: %s", application.Type, application.Name))
 	}
-	homebrew := b.Manifest.State.Applications.Homebrew
-	extensions := b.Manifest.State.Applications.VSCodeExtensions
-	if len(homebrew)+len(extensions) > 0 {
-		summary.WriteString("\nApplications:\n")
-		for _, application := range homebrew {
-			fmt.Fprintf(&summary, "- Homebrew: %s (%s)\n", application.Name, application.Type)
-		}
-		for _, extension := range extensions {
-			fmt.Fprintf(&summary, "- VS Code: %s\n", extension)
-		}
+	for _, extension := range b.Manifest.State.Applications.VSCodeExtensions {
+		applications.WillMigrate = append(applications.WillMigrate, "VS Code extension: "+extension)
 	}
 	for _, application := range b.Manifest.State.Applications.AppStore {
-		fmt.Fprintf(&summary, "- App Store: %s (%s)\n", application.Name, application.BundleID)
+		applications.WillMigrate = append(applications.WillMigrate, fmt.Sprintf("App Store: %s (%s)", application.Name, application.BundleID))
 	}
 	for _, application := range b.Manifest.State.Applications.Manual {
-		fmt.Fprintf(&summary, "- Manual installation required: %s (%s)\n", application.Name, application.Path)
+		applications.WillNotMigrate = append(applications.WillNotMigrate, fmt.Sprintf("%s (%s): no portable installer", application.Name, application.Path))
 	}
-	if b.Manifest.Excluded > 0 {
-		fmt.Fprintf(&summary, "\nExcluded during capture: %d\n", b.Manifest.Excluded)
+
+	dotfiles := InventoryGroup{Name: "Dotfiles", WillMigrate: []string{}, WillNotMigrate: []string{}}
+	for _, file := range b.Manifest.Files {
+		dotfiles.WillMigrate = append(dotfiles.WillMigrate, fmt.Sprintf("%s (%d bytes, mode %04o)", file.Destination, file.Size, file.Mode.Perm()))
+	}
+	for _, file := range b.Manifest.State.Dotfiles.Files {
+		dotfiles.WillNotMigrate = append(dotfiles.WillNotMigrate, file.Source+": unsafe, sensitive, nested, unavailable, or oversized")
+	}
+
+	settings := InventoryGroup{Name: "Settings", WillMigrate: migrationSettings(b.Manifest.State.Preferences), WillNotMigrate: []string{}}
+	for _, setting := range unsupportedSettings(b.Manifest.State.Preferences) {
+		settings.WillNotMigrate = append(settings.WillNotMigrate, setting+": unsupported")
+	}
+	return Inventory{Groups: []InventoryGroup{applications, dotfiles, settings}}
+}
+
+// FormatInventory renders the grouped inventory for plain-text interfaces.
+func FormatInventory(inventory Inventory) string {
+	var summary strings.Builder
+	summary.WriteString("Captured Migration Summary\n")
+	summary.WriteString("==========================\n")
+	for _, group := range inventory.Groups {
+		fmt.Fprintf(&summary, "\n%s\nWill migrate:\n", group.Name)
+		writeInventoryItems(&summary, group.WillMigrate)
+		summary.WriteString("Will not migrate:\n")
+		writeInventoryItems(&summary, group.WillNotMigrate)
 	}
 	return summary.String()
+}
+
+func writeInventoryItems(summary *strings.Builder, items []string) {
+	if len(items) == 0 {
+		summary.WriteString("- none\n")
+		return
+	}
+	for _, item := range items {
+		fmt.Fprintf(summary, "- %s\n", item)
+	}
+}
+
+func migrationSettings(prefs models.PreferencesGroup) []string {
+	if preferencesEmpty(prefs) {
+		return nil
+	}
+	settings := []string{
+		fmt.Sprintf("Finder show hidden files = %t", prefs.Finder.ShowHiddenFiles),
+		fmt.Sprintf("Dock autohide = %t", prefs.Dock.Autohide),
+		fmt.Sprintf("Dock show recents = %t", prefs.Dock.ShowRecents),
+	}
+	for name, value := range map[string]any{
+		"Finder default view": prefs.Finder.DefaultViewMode, "Dock position": prefs.Dock.Position,
+		"Keyboard repeat": prefs.Keyboard.KeyRepeat, "Keyboard initial repeat": prefs.Keyboard.InitialRepeat,
+		"Computer name": prefs.System.ComputerName, "Time zone": prefs.System.TimeZone, "Languages": prefs.System.Language,
+	} {
+		if fmt.Sprint(value) != "" && fmt.Sprint(value) != "0" {
+			settings = append(settings, fmt.Sprintf("%s = %v", name, value))
+		}
+	}
+	sort.Strings(settings)
+	return settings
+}
+
+func preferencesEmpty(prefs models.PreferencesGroup) bool {
+	return prefs.Finder == (models.FinderPrefs{}) && prefs.Dock.Position == "" && !prefs.Dock.Autohide && !prefs.Dock.ShowRecents && len(prefs.Dock.AppOrder) == 0 && len(prefs.Dock.PersistentApps) == 0 && prefs.Keyboard == (models.KeyboardPrefs{}) && prefs.Trackpad == (models.TrackpadPrefs{}) && prefs.System == (models.SystemPrefs{}) && len(prefs.Apps) == 0
+}
+
+func unsupportedSettings(prefs models.PreferencesGroup) []string {
+	var settings []string
+	if prefs.Keyboard.NumLock {
+		settings = append(settings, "Keyboard num lock")
+	}
+	if prefs.Trackpad != (models.TrackpadPrefs{}) {
+		settings = append(settings, "Trackpad preferences")
+	}
+	if prefs.System.ScreenBrightness != 0 {
+		settings = append(settings, "Screen brightness")
+	}
+	if len(prefs.Dock.AppOrder) > 0 || len(prefs.Dock.PersistentApps) > 0 {
+		settings = append(settings, "Dock application layout")
+	}
+	if len(prefs.Apps) > 0 {
+		settings = append(settings, "Application-specific preferences")
+	}
+	return settings
 }
 
 // Close closes the archive.

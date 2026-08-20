@@ -143,6 +143,19 @@ func TestIndexIncludesVimNavigation(t *testing.T) {
 	}
 }
 
+func TestIndexIncludesTabbedCaptureInventory(t *testing.T) {
+	server := NewServer("0", "9.8.7")
+	request := httptest.NewRequest("GET", "http://localhost/", nil)
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	for _, expected := range []string{"showInventory", "inventory.groups.forEach", "inventory-tab", "Will migrate", "Will not migrate"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("index does not contain inventory tab marker %q", expected)
+		}
+	}
+}
+
 func TestStateHandlerDetectsDefaultCapture(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

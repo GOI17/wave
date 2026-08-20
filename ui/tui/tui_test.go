@@ -89,7 +89,7 @@ func TestPreviewIncludesArchiveInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runPortableCommand(applyCmd, archive)().(cmdMsg)
-	if result.err != nil || !strings.Contains(result.output, "Migration Preview Summary") || !strings.Contains(result.output, "Portable Archive Contents") || !strings.Contains(result.output, ".vimrc") {
+	if result.err != nil || !strings.Contains(result.output, "Migration Preview Summary") || result.inventory == nil || len(result.inventory.Groups) != 3 || !strings.Contains(result.inventory.Groups[1].WillMigrate[0], ".vimrc") {
 		t.Fatalf("preview result = %#v", result)
 	}
 }
@@ -202,6 +202,25 @@ func TestModelShowsCommandOutputInsideTUI(t *testing.T) {
 	}
 }
 
+func TestInventoryGroupsAreCollapsedAndToggleable(t *testing.T) {
+	inventory := bundle.Inventory{Groups: []bundle.InventoryGroup{
+		{Name: "Applications", WillMigrate: []string{"jq"}, WillNotMigrate: []string{"Manual Tool"}},
+		{Name: "Dotfiles", WillMigrate: []string{".vimrc"}},
+		{Name: "Settings", WillMigrate: []string{"Dock autohide = true"}},
+	}}
+	model := InitialModel("1.2.0")
+	updated, _ := model.Update(cmdMsg{cmd: viewCmd, inventory: &inventory})
+	result := updated.(Model)
+	if result.screen != inventoryScreen || strings.Contains(result.View(), "Manual Tool") || !strings.Contains(result.View(), "▸ Applications") {
+		t.Fatalf("collapsed inventory = %s", result.View())
+	}
+	updated, _ = result.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	expanded := updated.(Model).View()
+	if !strings.Contains(expanded, "▾ Applications") || !strings.Contains(expanded, "Manual Tool") {
+		t.Fatalf("expanded inventory = %s", expanded)
+	}
+}
+
 func TestPortableViewRendersReadableArchive(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -216,7 +235,7 @@ func TestPortableViewRendersReadableArchive(t *testing.T) {
 	}
 	message := runPortableCommand(viewCmd, archive)()
 	result, ok := message.(cmdMsg)
-	if !ok || result.err != nil || !strings.Contains(result.output, "Portable Archive Contents") || !strings.Contains(result.output, ".vimrc") {
+	if !ok || result.err != nil || result.inventory == nil || len(result.inventory.Groups) != 3 || !strings.Contains(result.inventory.Groups[1].WillMigrate[0], ".vimrc") {
 		t.Fatalf("view result = %#v", message)
 	}
 }

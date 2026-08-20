@@ -1,7 +1,9 @@
 package bundle_test
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,9 +67,91 @@ func TestCreateAndOpenPortableBundle(t *testing.T) {
 		t.Fatalf("data = %q", data)
 	}
 	summary := bundle.FormatSummary(opened)
-	if !strings.Contains(summary, "Portable Archive Contents") || !strings.Contains(summary, "- .vimrc (18 bytes, mode 0640)") {
+	if !strings.Contains(summary, "Captured Migration Summary") || !strings.Contains(summary, "Dotfiles\nWill migrate:\n- .vimrc (18 bytes, mode 0640)") {
 		t.Fatalf("summary = %q", summary)
 	}
+}
+
+func TestFormatSummaryGroupsMigratedAndExcludedItems(t *testing.T) {
+	homeDir := t.TempDir()
+	vimrc := filepath.Join(homeDir, ".vimrc")
+	nested := filepath.Join(homeDir, ".config", "tool", "config")
+	if err := os.MkdirAll(filepath.Dir(nested), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vimrc, []byte("set number\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("theme=dark\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := &models.MigrationState{
+		Version: "1.0.0",
+		Applications: models.ApplicationGroup{
+			Homebrew: []models.HomebrewPackage{{Name: "jq", Type: "formula"}},
+			Manual:   []models.ManualApp{{Name: "Manual Tool", Path: "/Applications/Manual Tool.app"}},
+		},
+		Dotfiles: models.DotfilesGroup{Files: []models.DotfileEntry{{Source: vimrc}, {Source: nested}}},
+		Preferences: models.PreferencesGroup{
+			Finder:   models.FinderPrefs{ShowHiddenFiles: true},
+			Trackpad: models.TrackpadPrefs{Clicking: true},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "summary.wave")
+	if err := bundle.Create(path, homeDir, state); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := bundle.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	summary := bundle.FormatSummary(opened)
+	for _, expected := range []string{
+		"Applications\nWill migrate:\n- Homebrew formula: jq",
+		"Will not migrate:\n- Manual Tool (/Applications/Manual Tool.app): no portable installer",
+		"Dotfiles\nWill migrate:\n- .vimrc",
+		"Will not migrate:\n- .config/tool/config: unsafe, sensitive, nested, unavailable, or oversized",
+		"Settings\nWill migrate:",
+		"Will not migrate:\n- Trackpad preferences: unsupported",
+	} {
+		if !strings.Contains(summary, expected) {
+			t.Fatalf("summary missing %q:\n%s", expected, summary)
+		}
+	}
+}
+
+func TestCreateDoesNotSerializeInternalManualAppBundleID(t *testing.T) {
+	homeDir := t.TempDir()
+	bundlePath := filepath.Join(t.TempDir(), "device.wave")
+	state := &models.MigrationState{Version: "1.0.0", Applications: models.ApplicationGroup{Manual: []models.ManualApp{{Name: "Example", Path: "/Applications/Example.app", BundleID: "com.example.app"}}}}
+	if err := bundle.Create(bundlePath, homeDir, state); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.OpenReader(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for _, entry := range reader.File {
+		if entry.Name != "manifest.json" {
+			continue
+		}
+		manifest, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(manifest)
+		_ = manifest.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), `"bundle_id":"com.example.app"`) || strings.Contains(string(data), `"bundle_id": "com.example.app"`) {
+			t.Fatalf("manifest leaked internal manual app bundle ID: %s", data)
+		}
+		return
+	}
+	t.Fatal("manifest.json not found")
 }
 
 func TestCreateExcludesSensitiveAndUnsafeFiles(t *testing.T) {
@@ -122,8 +206,8 @@ func TestCreateExcludesSensitiveAndUnsafeFiles(t *testing.T) {
 	if opened.Manifest.Excluded != len(paths) {
 		t.Fatalf("excluded = %d, want %d", opened.Manifest.Excluded, len(paths))
 	}
-	if len(opened.Manifest.State.Dotfiles.Files) != 0 || len(opened.Manifest.State.Environment.EnvironmentVars) != 0 {
-		t.Fatalf("portable state retained sensitive path/environment metadata: %#v", opened.Manifest.State)
+	if len(opened.Manifest.State.Dotfiles.Files) != 1 || opened.Manifest.State.Dotfiles.Files[0].Source != ".config/external-link" || len(opened.Manifest.State.Environment.EnvironmentVars) != 0 {
+		t.Fatalf("portable state retained sensitive metadata or omitted safe exclusion: %#v", opened.Manifest.State)
 	}
 }
 

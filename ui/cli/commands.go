@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"wave/internal/analyzer"
+	"wave/internal/bundle"
 	"wave/internal/executor"
 	"wave/internal/migrator"
 	"wave/internal/transaction"
@@ -29,7 +30,7 @@ var (
 	startGUI          = gui.StartGUI
 	runBrew           = runHomebrew
 	// Version is overridden with release build flags.
-	Version = "1.2.0"
+	Version = "1.2.1"
 )
 
 // RootCmd is the root command
@@ -78,6 +79,14 @@ var captureCmd = &cobra.Command{
 
 		fmt.Println("\n✅ Device state captured successfully!")
 		fmt.Printf("📁 State file: %s\n", outputPath)
+		if strings.EqualFold(filepath.Ext(outputPath), ".wave") {
+			opened, err := bundle.Open(outputPath)
+			if err != nil {
+				return fmt.Errorf("read captured summary: %w", err)
+			}
+			fmt.Print("\n" + bundle.FormatSummary(opened))
+			_ = opened.Close()
+		}
 		fmt.Println("\nNext steps:")
 		fmt.Println("  • Keep the archive private; it contains configuration file contents")
 		fmt.Println("  • Transfer the .wave archive to the target machine")

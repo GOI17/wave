@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"wave/internal/analyzer"
+	"wave/internal/bundle"
 	"wave/internal/executor"
 	"wave/internal/migrator"
 	"wave/internal/transaction"
@@ -150,7 +151,15 @@ func (s *Server) captureHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "file": outputPath})
+	opened, err := bundle.Open(outputPath)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	summary := bundle.FormatSummary(opened)
+	inventory := bundle.BuildInventory(opened)
+	_ = opened.Close()
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "file": outputPath, "summary": summary, "inventory": inventory})
 }
 
 // applyHandler applies captured state
@@ -465,6 +474,45 @@ func getIndexHTML(version string) string {
 			white-space: pre-wrap;
 		}
 
+		.inventory-tabs {
+			display: flex;
+			gap: 8px;
+			margin-top: 15px;
+		}
+
+		.inventory-tab {
+			background: #353739;
+			border: 1px solid #515151;
+			border-radius: 5px 5px 0 0;
+			color: #A9B7C6;
+			cursor: pointer;
+			padding: 9px 14px;
+		}
+
+		.inventory-tab.active {
+			border-bottom-color: #2B2B2B;
+			color: #FFC66D;
+		}
+
+		.inventory-panel {
+			background: #2B2B2B;
+			border: 1px solid #515151;
+			padding: 16px;
+		}
+
+		.inventory-panel h4 {
+			color: #6A8759;
+			margin: 10px 0 6px;
+		}
+
+		.inventory-panel h4.excluded {
+			color: #FF6B68;
+		}
+
+		.inventory-panel ul {
+			margin-left: 20px;
+		}
+
         .loading {
             display: block;
             text-align: center;
@@ -722,6 +770,51 @@ func getIndexHTML(version string) string {
 			elem.appendChild(report);
 		}
 
+		function showInventory(elementId, file, inventory) {
+			const container = document.getElementById(elementId);
+			container.replaceChildren();
+			const status = document.createElement('div');
+			status.className = 'status success';
+			status.textContent = 'State captured successfully: ' + file;
+			container.appendChild(status);
+
+			const tabs = document.createElement('div');
+			tabs.className = 'inventory-tabs';
+			const panel = document.createElement('div');
+			panel.className = 'inventory-panel';
+			container.append(tabs, panel);
+
+			function renderGroup(group, selected) {
+				tabs.querySelectorAll('.inventory-tab').forEach(tab => tab.classList.remove('active'));
+				selected.classList.add('active');
+				panel.replaceChildren();
+				for (const [heading, items, excluded] of [
+					['Will migrate', group.will_migrate, false],
+					['Will not migrate', group.will_not_migrate, true]
+				]) {
+					const title = document.createElement('h4');
+					title.textContent = heading + ' (' + items.length + ')';
+					if (excluded) title.className = 'excluded';
+					const list = document.createElement('ul');
+					for (const item of items.length ? items : ['none']) {
+						const entry = document.createElement('li');
+						entry.textContent = item;
+						list.appendChild(entry);
+					}
+					panel.append(title, list);
+				}
+			}
+
+			inventory.groups.forEach((group, index) => {
+				const tab = document.createElement('button');
+				tab.className = 'inventory-tab';
+				tab.textContent = group.name;
+				tab.addEventListener('click', () => renderGroup(group, tab));
+				tabs.appendChild(tab);
+				if (index === 0) renderGroup(group, tab);
+			});
+		}
+
         function captureState() {
             showStatus('capture-status', 'Capturing device state...', 'info');
 
@@ -729,7 +822,7 @@ func getIndexHTML(version string) string {
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        showStatus('capture-status', '✅ State captured successfully! File: ' + data.file, 'success');
+						showInventory('capture-status', data.file, data.inventory);
 						loadDefaultState();
                     } else {
                         showStatus('capture-status', '❌ Error: ' + data.error, 'error');

@@ -10,7 +10,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"wave/internal/analyzer"
 	"wave/internal/bundle"
+	"wave/internal/executor"
 	"wave/internal/migrator"
 	"wave/internal/transaction"
 )
@@ -52,14 +54,18 @@ type Model struct {
 	archiveCursor int
 	output        string
 	outputOffset  int
+	inventory     *bundle.Inventory
+	groupCursor   int
+	expanded      map[int]bool
 }
 
 type screenType string
 
 const (
-	menuScreen   screenType = "menu"
-	pickerScreen screenType = "picker"
-	outputScreen screenType = "output"
+	menuScreen      screenType = "menu"
+	pickerScreen    screenType = "picker"
+	outputScreen    screenType = "output"
+	inventoryScreen screenType = "inventory"
 )
 
 // InitialModel creates a new model
@@ -75,6 +81,7 @@ func InitialModel(version string) Model {
 			"Exit",
 		},
 		selected: make(map[int]bool),
+		expanded: make(map[int]bool),
 		run:      runCommand,
 		version:  version,
 	}
@@ -104,6 +111,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.outputOffset = 0
 			m.screen = outputScreen
 		}
+		if msg.inventory != nil {
+			m.inventory = msg.inventory
+			m.groupCursor = 0
+			m.expanded = make(map[int]bool)
+			m.screen = inventoryScreen
+		}
 		return m, nil
 
 	case archivesMsg:
@@ -117,6 +130,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.screen == inventoryScreen {
+			switch msg.String() {
+			case "esc", "q":
+				m.screen = menuScreen
+				m.inventory = nil
+			case "up", "k":
+				if m.groupCursor > 0 {
+					m.groupCursor--
+				}
+			case "down", "j":
+				if m.inventory != nil && m.groupCursor < len(m.inventory.Groups)-1 {
+					m.groupCursor++
+				}
+			case "enter", " ":
+				m.expanded[m.groupCursor] = !m.expanded[m.groupCursor]
+			}
+			return m, nil
+		}
 		if m.screen == outputScreen {
 			switch msg.String() {
 			case "esc", "q", "enter":
@@ -241,6 +272,26 @@ func (m Model) View() string {
 		s += "\n" + mutedStyle.Render("Use j/k to scroll, enter or esc to go back") + "\n"
 		return m.render(s)
 	}
+	if m.screen == inventoryScreen {
+		s += "Captured Migration Summary\n\n"
+		for i, group := range m.inventory.Groups {
+			cursor := " "
+			if i == m.groupCursor {
+				cursor = highlightStyle.Render("❯")
+			}
+			marker := "▸"
+			if m.expanded[i] {
+				marker = "▾"
+			}
+			s += fmt.Sprintf("%s %s %s (%d migrate, %d excluded)\n", cursor, marker, group.Name, len(group.WillMigrate), len(group.WillNotMigrate))
+			if m.expanded[i] {
+				s += renderInventoryItems("  Will migrate", group.WillMigrate)
+				s += renderInventoryItems("  Will not migrate", group.WillNotMigrate)
+			}
+		}
+		s += "\n" + mutedStyle.Render("Use j/k to choose a group, enter to expand or collapse, esc to go back") + "\n"
+		return m.render(s)
+	}
 	s += "Choose an action:\n\n"
 
 	for i, choice := range m.choices {
@@ -258,6 +309,19 @@ func (m Model) View() string {
 	}
 
 	return m.render(s)
+}
+
+func renderInventoryItems(label string, items []string) string {
+	var output strings.Builder
+	output.WriteString(label + ":\n")
+	if len(items) == 0 {
+		output.WriteString("    - none\n")
+		return output.String()
+	}
+	for _, item := range items {
+		fmt.Fprintf(&output, "    - %s\n", item)
+	}
+	return output.String()
 }
 
 func (m Model) render(content string) string {
@@ -294,7 +358,7 @@ const (
 
 // runCommand suspends the TUI while the selected workflow uses the terminal.
 func runCommand(cmd cmdType, archivePath string) tea.Cmd {
-	if cmd == applyCmd || cmd == liveApplyCmd || cmd == viewCmd || cmd == rollbackCmd {
+	if cmd == captureCmd || cmd == applyCmd || cmd == liveApplyCmd || cmd == viewCmd || cmd == rollbackCmd {
 		return runPortableCommand(cmd, archivePath)
 	}
 	executable, err := os.Executable()
@@ -324,6 +388,19 @@ func runPortableCommand(cmd cmdType, archivePath string) tea.Cmd {
 			return cmdMsg{cmd: cmd, err: err}
 		}
 		switch cmd {
+		case captureCmd:
+			archivePath = filepath.Join(homeDir, "wave-state.wave")
+			mig := migrator.NewMigrator(analyzer.NewMacOSAnalyzer(homeDir), executor.NewMacOSExecutor(homeDir, false))
+			if err := mig.CaptureBundle(archivePath, homeDir); err != nil {
+				return cmdMsg{cmd: cmd, err: err}
+			}
+			opened, err := bundle.Open(archivePath)
+			if err != nil {
+				return cmdMsg{cmd: cmd, err: err}
+			}
+			defer opened.Close()
+			inventory := bundle.BuildInventory(opened)
+			return cmdMsg{cmd: cmd, output: "State captured: " + archivePath, inventory: &inventory}
 		case applyCmd:
 			result, err := transaction.Preview(archivePath)
 			if err != nil {
@@ -334,7 +411,8 @@ func runPortableCommand(cmd cmdType, archivePath string) tea.Cmd {
 				return cmdMsg{cmd: cmd, err: err}
 			}
 			defer opened.Close()
-			return cmdMsg{cmd: cmd, output: migrator.FormatSummary(result) + "\n" + bundle.FormatSummary(opened)}
+			inventory := bundle.BuildInventory(opened)
+			return cmdMsg{cmd: cmd, output: migrator.FormatSummary(result), inventory: &inventory}
 		case liveApplyCmd:
 			journal, err := transaction.Apply(archivePath, homeDir, filepath.Join(homeDir, ".wave", "transactions"))
 			if err != nil {
@@ -358,7 +436,8 @@ func runPortableCommand(cmd cmdType, archivePath string) tea.Cmd {
 					return cmdMsg{cmd: cmd, err: err}
 				}
 			}
-			return cmdMsg{cmd: cmd, output: bundle.FormatSummary(opened)}
+			inventory := bundle.BuildInventory(opened)
+			return cmdMsg{cmd: cmd, inventory: &inventory}
 		default:
 			return cmdMsg{cmd: cmd, err: fmt.Errorf("unsupported portable command: %s", cmd)}
 		}
@@ -432,9 +511,10 @@ func commandLabel(cmd cmdType) string {
 
 // cmdMsg represents the result of a command
 type cmdMsg struct {
-	cmd    cmdType
-	output string
-	err    error
+	cmd       cmdType
+	output    string
+	inventory *bundle.Inventory
+	err       error
 }
 
 type archivesMsg struct {

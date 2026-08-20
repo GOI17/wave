@@ -51,7 +51,7 @@ type ManualApp struct {
 	Name     string `yaml:"name" json:"name"`
 	Path     string `yaml:"path" json:"path"`
 	Version  string `yaml:"version" json:"version"`
-	BundleID string `yaml:"bundle_id" json:"bundle_id"`
+	BundleID string `yaml:"-" json:"-"`
 }
 
 // DotfilesGroup groups dotfiles and configuration
