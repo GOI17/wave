@@ -69,6 +69,18 @@ func TestViewUsesRuntimeVersionAndDarculaPalette(t *testing.T) {
 	}
 }
 
+func TestModelUsesTerminalDimensions(t *testing.T) {
+	model := InitialModel("1.0.3")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	resized := updated.(Model)
+	if resized.width != 120 || resized.height != 40 {
+		t.Fatalf("dimensions = %dx%d, want 120x40", resized.width, resized.height)
+	}
+	if rendered := resized.View(); lipgloss.Width(rendered) != 120 {
+		t.Fatalf("rendered width = %d, want 120", lipgloss.Width(rendered))
+	}
+}
+
 func TestCommandFor(t *testing.T) {
 	tests := []struct {
 		name string

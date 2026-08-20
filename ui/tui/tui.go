@@ -38,6 +38,8 @@ type Model struct {
 	status      string
 	run         func(cmdType) tea.Cmd
 	version     string
+	width       int
+	height      int
 }
 
 // InitialModel creates a new model
@@ -65,6 +67,11 @@ func (m Model) Init() tea.Cmd {
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
 	case cmdMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("%s failed: %v", commandLabel(msg.cmd), msg.err)
@@ -129,7 +136,11 @@ func (m Model) View() string {
 		s += "\n" + m.status + "\n"
 	}
 
-	return docStyle.Render(s)
+	style := docStyle
+	if m.width > 0 && m.height > 0 {
+		style = style.Width(m.width - 4).Height(m.height - 2)
+	}
+	return style.Render(s)
 }
 
 // cmdType represents a command to execute
@@ -208,7 +219,7 @@ type cmdMsg struct {
 
 // StartTUI launches the TUI
 func StartTUI(version string) error {
-	p := tea.NewProgram(InitialModel(version))
+	p := tea.NewProgram(InitialModel(version), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("error running tui: %w", err)
 	}
