@@ -19,6 +19,8 @@ const (
 	formatVersion = 1
 	maxFileSize   = 32 << 20
 	maxBundleSize = 512 << 20
+	maxTotalSize  = 256 << 20
+	maxFileCount  = 10000
 )
 
 // Manifest describes the portable contents of a .wave archive.
@@ -185,6 +187,10 @@ func Open(path string) (*Bundle, error) {
 			_ = reader.Close()
 			return nil, fmt.Errorf("unsafe archive path: %s", entry.Name)
 		}
+		if _, exists := bundle.entries[entry.Name]; exists {
+			_ = reader.Close()
+			return nil, fmt.Errorf("duplicate archive entry: %s", entry.Name)
+		}
 		bundle.entries[entry.Name] = entry
 	}
 	manifestEntry := bundle.entries[manifestName]
@@ -207,10 +213,26 @@ func Open(path string) (*Bundle, error) {
 		_ = reader.Close()
 		return nil, fmt.Errorf("unsupported bundle format")
 	}
+	if len(bundle.Manifest.Files) > maxFileCount {
+		_ = reader.Close()
+		return nil, fmt.Errorf("bundle contains too many files")
+	}
+	destinations := make(map[string]bool)
+	var totalSize int64
 	for _, file := range bundle.Manifest.Files {
 		if unsafePath(filepath.FromSlash(file.Destination)) || !strings.HasPrefix(file.Payload, "files/") || bundle.entries[file.Payload] == nil {
 			_ = reader.Close()
 			return nil, fmt.Errorf("invalid bundle file entry")
+		}
+		if destinations[file.Destination] {
+			_ = reader.Close()
+			return nil, fmt.Errorf("duplicate destination: %s", file.Destination)
+		}
+		destinations[file.Destination] = true
+		totalSize += file.Size
+		if file.Size < 0 || totalSize > maxTotalSize {
+			_ = reader.Close()
+			return nil, fmt.Errorf("bundle payloads exceed maximum size")
 		}
 	}
 	return bundle, nil
