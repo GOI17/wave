@@ -120,6 +120,29 @@ func TestIndexUsesRuntimeVersionAndDarculaPalette(t *testing.T) {
 	}
 }
 
+func TestIndexIncludesVimNavigation(t *testing.T) {
+	server := NewServer("0", "9.8.7")
+	request := httptest.NewRequest("GET", "http://localhost/", nil)
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	for _, expected := range []string{
+		`data-tab="capture"`,
+		`class="button vim-action`,
+		`document.addEventListener('keydown'`,
+		`event.key === 'h' || event.key === 'l'`,
+		`event.key === 'j' || event.key === 'k'`,
+		`event.key === 'Enter' || event.key === ' '`,
+		`isTypingTarget(event.target)`,
+		`h/l tabs • j/k actions • enter select`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("index does not contain Vim navigation marker %q", expected)
+		}
+	}
+}
+
 func TestStateHandlerDetectsDefaultCapture(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

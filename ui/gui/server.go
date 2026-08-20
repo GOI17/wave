@@ -385,7 +385,6 @@ func getIndexHTML(version string) string {
 			background: #365880;
 			color: #F2F2F2;
 			border: 1px solid #4E78A6;
-            border: none;
             border-radius: 6px;
             font-size: 1em;
             cursor: pointer;
@@ -403,6 +402,19 @@ func getIndexHTML(version string) string {
         .button:active {
             transform: translateY(0);
         }
+
+		.button.vim-selected {
+			border-color: #CC7832;
+			box-shadow: 0 0 0 2px rgba(204, 120, 50, 0.25);
+			position: relative;
+		}
+
+		.button.vim-selected::before {
+			color: #FFC66D;
+			content: "❯";
+			left: 12px;
+			position: absolute;
+		}
 
         .button.secondary {
 			background: #4E5254;
@@ -534,6 +546,12 @@ func getIndexHTML(version string) string {
 			border-bottom-color: #CC7832;
         }
 
+		.tab.vim-selected {
+			background: #353739;
+			outline: 1px solid #515151;
+			outline-offset: -1px;
+		}
+
         .tab-content {
             display: none;
         }
@@ -552,9 +570,9 @@ func getIndexHTML(version string) string {
 
         <div class="content">
             <div class="tabs">
-                <button class="tab active" onclick="switchTab(this, 'capture')">📦 Capture</button>
-				<button class="tab" onclick="switchTab(this, 'apply')">⚡ Preview</button>
-                <button class="tab" onclick="switchTab(this, 'info')">ℹ️ Info</button>
+                <button class="tab active vim-selected" data-tab="capture" onclick="switchTab(this, 'capture')">📦 Capture</button>
+				<button class="tab" data-tab="apply" onclick="switchTab(this, 'apply')">⚡ Preview</button>
+                <button class="tab" data-tab="info" onclick="switchTab(this, 'info')">ℹ️ Info</button>
             </div>
 
             <!-- Capture Tab -->
@@ -562,7 +580,7 @@ func getIndexHTML(version string) string {
                 <div class="section">
                     <h2><span>📦</span>Capture Device State</h2>
                     <p>Export your current device configuration to a file.</p>
-                    <button class="button" onclick="captureState()">Start Capture</button>
+                    <button class="button vim-action vim-selected" onclick="captureState()">Start Capture</button>
                     <div id="capture-status"></div>
                 </div>
             </div>
@@ -580,17 +598,17 @@ func getIndexHTML(version string) string {
                         <input type="checkbox" id="dry-run" checked disabled>
                         <label for="dry-run">Dry-run required (preview only)</label>
                     </div>
-                    <button class="button" onclick="applyState()">Preview Migration</button>
+                    <button class="button vim-action" onclick="applyState()">Preview Migration</button>
 					<div class="file-input-wrapper">
 						<label for="apply-confirmation">Type APPLY to confirm changes:</label>
 						<input type="text" id="apply-confirmation" autocomplete="off">
 					</div>
-					<button class="button" onclick="applyLiveState()">Apply Migration</button>
+					<button class="button vim-action" onclick="applyLiveState()">Apply Migration</button>
 					<div class="file-input-wrapper">
 						<label for="rollback-confirmation">Type ROLLBACK to restore the latest transaction:</label>
 						<input type="text" id="rollback-confirmation" autocomplete="off">
 					</div>
-					<button class="button secondary" onclick="rollbackState()">Rollback Latest Migration</button>
+					<button class="button secondary vim-action" onclick="rollbackState()">Rollback Latest Migration</button>
                     <div id="apply-status"></div>
                 </div>
             </div>
@@ -619,7 +637,7 @@ func getIndexHTML(version string) string {
         </div>
 
         <footer>
-			<p>Wave v{{VERSION}} • macOS Device Migrator • Open Source</p>
+			<p>Wave v{{VERSION}} • h/l tabs • j/k actions • enter select</p>
         </footer>
     </div>
 
@@ -631,12 +649,60 @@ func getIndexHTML(version string) string {
 
             // Remove active class from all tabs
             const tabs = document.querySelectorAll('.tab');
-            tabs.forEach(t => t.classList.remove('active'));
+            tabs.forEach(t => t.classList.remove('active', 'vim-selected'));
 
             // Show selected tab
             document.getElementById(tabName).classList.add('active');
-            button.classList.add('active');
+            button.classList.add('active', 'vim-selected');
+			selectAction(0);
         }
+
+		function activeActions() {
+			return Array.from(document.querySelectorAll('.tab-content.active .vim-action'));
+		}
+
+		function selectAction(index) {
+			const actions = activeActions();
+			document.querySelectorAll('.vim-action').forEach(action => action.classList.remove('vim-selected'));
+			if (!actions.length) return;
+			const selected = actions[Math.max(0, Math.min(index, actions.length - 1))];
+			selected.classList.add('vim-selected');
+			selected.focus({ preventScroll: true });
+		}
+
+		function isTypingTarget(target) {
+			return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable;
+		}
+
+		document.addEventListener('click', event => {
+			const action = event.target.closest('.vim-action');
+			if (!action) return;
+			selectAction(activeActions().indexOf(action));
+		});
+
+		document.addEventListener('keydown', event => {
+			if (event.metaKey || event.ctrlKey || event.altKey || isTypingTarget(event.target)) return;
+
+			const tabs = Array.from(document.querySelectorAll('.tab'));
+			const activeTab = tabs.findIndex(tab => tab.classList.contains('active'));
+			const actions = activeActions();
+			const selectedAction = actions.findIndex(action => action.classList.contains('vim-selected'));
+
+			if (event.key === 'h' || event.key === 'l') {
+				const direction = event.key === 'h' ? -1 : 1;
+				const next = (activeTab + direction + tabs.length) % tabs.length;
+				switchTab(tabs[next], tabs[next].dataset.tab);
+				event.preventDefault();
+			} else if ((event.key === 'j' || event.key === 'k') && actions.length) {
+				const direction = event.key === 'j' ? 1 : -1;
+				const next = Math.max(0, Math.min(selectedAction + direction, actions.length - 1));
+				selectAction(next);
+				event.preventDefault();
+			} else if ((event.key === 'Enter' || event.key === ' ') && selectedAction >= 0) {
+				actions[selectedAction].click();
+				event.preventDefault();
+			}
+		});
 
         function showStatus(elementId, message, type) {
             const elem = document.getElementById(elementId);
