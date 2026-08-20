@@ -19,6 +19,7 @@ import (
 	"wave/internal/bundle"
 	"wave/internal/executor"
 	"wave/internal/migrator"
+	"wave/internal/share"
 	"wave/internal/transaction"
 )
 
@@ -29,6 +30,8 @@ type Server struct {
 	operationMu sync.Mutex
 	version     string
 }
+
+var shareArchive = share.Archive
 
 // NewServer creates a new GUI server
 func NewServer(port, version string) *Server {
@@ -78,6 +81,7 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("/api/capture", s.localOnly(s.exclusive(http.HandlerFunc(s.captureHandler))))
 	s.mux.Handle("/api/apply", s.localOnly(s.exclusive(http.HandlerFunc(s.applyHandler))))
 	s.mux.Handle("/api/rollback", s.localOnly(s.exclusive(http.HandlerFunc(s.rollbackHandler))))
+	s.mux.Handle("/api/share", s.localOnly(s.exclusive(http.HandlerFunc(s.shareHandler))))
 	s.mux.Handle("/api/status", s.localOnly(http.HandlerFunc(s.statusHandler)))
 	s.mux.Handle("/api/state", s.localOnly(http.HandlerFunc(s.stateHandler)))
 }
@@ -160,6 +164,23 @@ func (s *Server) captureHandler(w http.ResponseWriter, r *http.Request) {
 	inventory := bundle.BuildInventory(opened)
 	_ = opened.Close()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "file": outputPath, "summary": summary, "inventory": inventory})
+}
+
+func (s *Server) shareHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if err := shareArchive(filepath.Join(homeDir, "wave-state.wave")); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // applyHandler applies captured state
@@ -629,6 +650,7 @@ func getIndexHTML(version string) string {
                     <h2><span>📦</span>Capture Device State</h2>
                     <p>Export your current device configuration to a file.</p>
                     <button class="button vim-action vim-selected" onclick="captureState()">Start Capture</button>
+					<button class="button secondary vim-action" onclick="shareState()">Share Captured Archive</button>
                     <div id="capture-status"></div>
                 </div>
             </div>
@@ -830,6 +852,20 @@ func getIndexHTML(version string) string {
                 })
                 .catch(err => showStatus('capture-status', '❌ Error: ' + err.message, 'error'));
         }
+
+		function shareState() {
+			showStatus('capture-status', 'Opening macOS Share Sheet...', 'info');
+			fetch('/api/share', { method: 'POST' })
+				.then(r => r.json())
+				.then(data => {
+					if (data.success) {
+						showStatus('capture-status', 'Share Sheet closed', 'success');
+					} else {
+						showStatus('capture-status', 'Error: ' + data.error, 'error');
+					}
+				})
+				.catch(err => showStatus('capture-status', 'Error: ' + err.message, 'error'));
+		}
 
 		function migrationFormData(dryRun) {
             const fileInput = document.getElementById('state-file');

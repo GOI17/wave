@@ -153,6 +153,7 @@ func TestCommandFor(t *testing.T) {
 		want []string
 	}{
 		{name: "capture", cmd: captureCmd, want: []string{"/tmp/wave", "capture", "--output", "/tmp/state.yaml"}},
+		{name: "share", cmd: shareCmd, want: []string{"/tmp/wave", "share", "--input", "/tmp/state.yaml"}},
 	}
 
 	for _, tt := range tests {

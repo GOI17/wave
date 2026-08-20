@@ -80,6 +80,27 @@ func TestConfirmedUninstallUsesHomebrewFormula(t *testing.T) {
 	}
 }
 
+func TestShareUsesSelectedArchive(t *testing.T) {
+	originalShare := shareArchive
+	originalInput := inputPath
+	defer func() {
+		shareArchive = originalShare
+		inputPath = originalInput
+	}()
+	inputPath = "/tmp/selected.wave"
+	var shared string
+	shareArchive = func(path string) error {
+		shared = path
+		return nil
+	}
+	if err := shareCmd.RunE(shareCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if shared != inputPath {
+		t.Fatalf("shared = %q, want %q", shared, inputPath)
+	}
+}
+
 func TestRollbackRequiresConfirmation(t *testing.T) {
 	original := rollbackConfirm
 	rollbackConfirm = false

@@ -12,6 +12,7 @@ import (
 	"wave/internal/bundle"
 	"wave/internal/executor"
 	"wave/internal/migrator"
+	"wave/internal/share"
 	"wave/internal/transaction"
 	"wave/ui/gui"
 	"wave/ui/tui"
@@ -29,8 +30,9 @@ var (
 	transactionID     string
 	startGUI          = gui.StartGUI
 	runBrew           = runHomebrew
+	shareArchive      = share.Archive
 	// Version is overridden with release build flags.
-	Version = "1.2.1"
+	Version = "1.2.2"
 )
 
 // RootCmd is the root command
@@ -305,6 +307,25 @@ var uninstallCmd = &cobra.Command{
 	},
 }
 
+var shareCmd = &cobra.Command{
+	Use:   "share",
+	Short: "Share a .wave archive with the macOS Share Sheet",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		path := inputPath
+		if path == "" {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return err
+			}
+			path = filepath.Join(homeDir, "wave-state.wave")
+		}
+		if err := shareArchive(path); err != nil {
+			return fmt.Errorf("share failed: %w", err)
+		}
+		return nil
+	},
+}
+
 func runHomebrew(args ...string) error {
 	brew, err := exec.LookPath("brew")
 	if err != nil {
@@ -340,6 +361,7 @@ func init() {
 	// GUI command flags
 	guiCmd.Flags().String("port", "8080", "Port to run GUI server on")
 	uninstallCmd.Flags().BoolVar(&uninstallConfirm, "confirm", false, "Confirm removal of the Wave Homebrew formula")
+	shareCmd.Flags().StringVarP(&inputPath, "input", "i", "", "Portable .wave archive (default: ~/wave-state.wave)")
 
 	// Add commands to root
 	RootCmd.AddCommand(captureCmd)
@@ -353,4 +375,5 @@ func init() {
 	RootCmd.AddCommand(versionCmd)
 	RootCmd.AddCommand(updateCmd)
 	RootCmd.AddCommand(uninstallCmd)
+	RootCmd.AddCommand(shareCmd)
 }

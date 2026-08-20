@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -153,6 +154,38 @@ func TestIndexIncludesTabbedCaptureInventory(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("index does not contain inventory tab marker %q", expected)
 		}
+	}
+}
+
+func TestIndexIncludesNativeShareAction(t *testing.T) {
+	server := NewServer("0", "9.8.7")
+	request := httptest.NewRequest("GET", "http://localhost/", nil)
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	for _, expected := range []string{"Share Captured Archive", "function shareState()", "fetch('/api/share'"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("index does not contain native share marker %q", expected)
+		}
+	}
+}
+
+func TestShareHandlerUsesDefaultArchive(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	original := shareArchive
+	defer func() { shareArchive = original }()
+	var shared string
+	shareArchive = func(path string) error {
+		shared = path
+		return nil
+	}
+	server := NewServer("0", "1.2.1")
+	request := httptest.NewRequest("POST", "http://localhost/api/share", nil)
+	recorder := httptest.NewRecorder()
+	server.mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || shared != filepath.Join(homeDir, "wave-state.wave") {
+		t.Fatalf("status = %d, shared = %q", recorder.Code, shared)
 	}
 }
 

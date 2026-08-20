@@ -138,6 +138,7 @@ wave capture [--output setup.wave]
 wave apply --input setup.wave --dry-run
 wave apply --input setup.wave --confirm
 wave rollback [--transaction ID] --confirm
+wave share [--input setup.wave]
 wave update
 wave uninstall --confirm
 wave tui

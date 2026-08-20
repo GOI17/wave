@@ -78,6 +78,7 @@ func InitialModel(version string) Model {
 			"Apply Migration",
 			"Rollback Latest Migration",
 			"View Captured Archive",
+			"Share Captured Archive",
 			"Exit",
 		},
 		selected: make(map[int]bool),
@@ -242,6 +243,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pending = viewCmd
 				return m, discoverArchives()
 			case 5:
+				m.pending = shareCmd
+				return m, discoverArchives()
+			case 6:
 				return m, tea.Quit
 			}
 		}
@@ -354,6 +358,7 @@ const (
 	liveApplyCmd cmdType = "live-apply"
 	rollbackCmd  cmdType = "rollback"
 	viewCmd      cmdType = "view"
+	shareCmd     cmdType = "share"
 )
 
 // runCommand suspends the TUI while the selected workflow uses the terminal.
@@ -372,6 +377,9 @@ func runCommand(cmd cmdType, archivePath string) tea.Cmd {
 	}
 
 	process, err := commandFor(cmd, executable, filepath.Join(homeDir, "wave-state.wave"))
+	if cmd == shareCmd {
+		process, err = commandFor(cmd, executable, archivePath)
+	}
 	if err != nil {
 		return commandResult(cmd, err)
 	}
@@ -481,6 +489,8 @@ func commandFor(cmd cmdType, executable, statePath string) (*exec.Cmd, error) {
 		return exec.Command(executable, "rollback", "--confirm"), nil
 	case viewCmd:
 		return exec.Command("/usr/bin/less", statePath), nil
+	case shareCmd:
+		return exec.Command(executable, "share", "--input", statePath), nil
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -504,6 +514,8 @@ func commandLabel(cmd cmdType) string {
 		return "Rollback"
 	case viewCmd:
 		return "State viewer"
+	case shareCmd:
+		return "Share"
 	default:
 		return "Command"
 	}

@@ -42,6 +42,12 @@ wave capture --output wave-state.wave
 Keep `wave-state.wave` private. It contains vetted root dotfile contents and
 device metadata; known credential content and nested configuration are excluded.
 
+Open the native macOS Share Sheet for the archive:
+
+```bash
+wave share --input wave-state.wave
+```
+
 ## 3. Preview
 
 ```bash
