@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/unix"
 	"wave/internal/bundle"
 	"wave/internal/models"
 )
@@ -21,57 +22,41 @@ const journalName = "journal.json"
 
 // Journal records the durable state needed to rollback one apply.
 type Journal struct {
-	ID          string              `json:"id"`
-	CreatedAt   time.Time           `json:"created_at"`
-	Status      string              `json:"status"`
-	Files       []FileJournal       `json:"files"`
-	Preferences []PreferenceJournal `json:"preferences"`
-	Packages    []PackageJournal    `json:"packages"`
-}
-
-// PreferenceJournal records one defaults key's before and applied values.
-type PreferenceJournal struct {
-	Domain       string `json:"domain"`
-	Key          string `json:"key"`
-	Existed      bool   `json:"existed"`
-	BeforeType   string `json:"before_type,omitempty"`
-	BeforeValue  string `json:"before_value,omitempty"`
-	AppliedType  string `json:"applied_type"`
-	AppliedValue string `json:"applied_value"`
-	RolledBack   bool   `json:"rolled_back"`
-}
-
-// PackageJournal records software introduced by one transaction.
-type PackageJournal struct {
-	Manager        string `json:"manager"`
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	AppliedVersion string `json:"applied_version,omitempty"`
-	Applied        bool   `json:"applied"`
-	RolledBack     bool   `json:"rolled_back"`
+	Version   int           `json:"version"`
+	ID        string        `json:"id"`
+	CreatedAt time.Time     `json:"created_at"`
+	Status    string        `json:"status"`
+	Files     []FileJournal `json:"files"`
 }
 
 // FileJournal records one applied file's before and after state.
 type FileJournal struct {
-	Destination string      `json:"destination"`
-	Existed     bool        `json:"existed"`
-	Before      string      `json:"before,omitempty"`
-	BeforeHash  string      `json:"before_hash,omitempty"`
-	BeforeMode  os.FileMode `json:"before_mode,omitempty"`
-	AppliedHash string      `json:"applied_hash"`
-	AppliedMode os.FileMode `json:"applied_mode"`
-	RolledBack  bool        `json:"rolled_back"`
+	Destination      string      `json:"destination"`
+	Existed          bool        `json:"existed"`
+	Before           string      `json:"before,omitempty"`
+	BeforeHash       string      `json:"before_hash,omitempty"`
+	BeforeMode       os.FileMode `json:"before_mode,omitempty"`
+	BeforeDevice     uint64      `json:"before_device,omitempty"`
+	BeforeInode      uint64      `json:"before_inode,omitempty"`
+	AppliedHash      string      `json:"applied_hash"`
+	AppliedMode      os.FileMode `json:"applied_mode"`
+	AppliedDevice    uint64      `json:"applied_device,omitempty"`
+	AppliedInode     uint64      `json:"applied_inode,omitempty"`
+	Staged           string      `json:"staged"`
+	Applying         bool        `json:"applying"`
+	Applied          bool        `json:"applied"`
+	RolledBack       bool        `json:"rolled_back"`
+	PreservedBefore  string      `json:"preserved_before,omitempty"`
+	PreservedApplied string      `json:"preserved_applied,omitempty"`
 }
 
 // RollbackResult summarizes a conflict-safe rollback.
 type RollbackResult struct {
-	TransactionID       string   `json:"transaction_id"`
-	Restored            int      `json:"restored"`
-	Removed             int      `json:"removed"`
-	Conflicts           int      `json:"conflicts"`
-	ConflictPaths       []string `json:"conflict_paths"`
-	PreferencesRestored int      `json:"preferences_restored"`
-	PackagesRemoved     int      `json:"packages_removed"`
+	TransactionID string   `json:"transaction_id"`
+	Restored      int      `json:"restored"`
+	Removed       int      `json:"removed"`
+	Conflicts     int      `json:"conflicts"`
+	ConflictPaths []string `json:"conflict_paths"`
 }
 
 // Preview returns a non-mutating summary of a portable bundle.
@@ -81,13 +66,25 @@ func Preview(bundlePath string) (*models.MigrationResult, error) {
 		return nil, err
 	}
 	defer opened.Close()
+	for _, file := range opened.Manifest.Files {
+		if _, err := opened.ReadFile(file); err != nil {
+			return nil, err
+		}
+	}
 	state := opened.Manifest.State
 	result := &models.MigrationResult{DryRun: true, Warnings: []string{}}
-	addPreviewCategory(result, "Applications", len(state.Applications.Homebrew)+len(state.Applications.VSCodeExtensions), 0)
+	applicationCount := len(state.Applications.Homebrew) + len(state.Applications.VSCodeExtensions)
+	addPreviewCategory(result, "Applications", 0, applicationCount)
 	addPreviewCategory(result, "Dotfiles", len(opened.Manifest.Files), 0)
-	preferenceCount := len(preferenceSpecs(state))
-	addPreviewCategory(result, "Preferences", preferenceCount, 0)
+	preferenceCount := countPreferences(state)
+	addPreviewCategory(result, "Preferences", 0, preferenceCount)
 	addPreviewCategory(result, "Environment", 0, 0)
+	if applicationCount > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d application changes are preview-only and will not be applied", applicationCount))
+	}
+	if preferenceCount > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d preference changes are preview-only and will not be applied", preferenceCount))
+	}
 	if opened.Manifest.Excluded > 0 {
 		result.Skipped += opened.Manifest.Excluded
 		result.Total += opened.Manifest.Excluded
@@ -107,6 +104,50 @@ func addPreviewCategory(result *models.MigrationResult, name string, ready, skip
 
 // Latest returns the latest transaction that can still be rolled back.
 func Latest(transactionsDir string) (*Journal, error) {
+	unlock, err := acquireLock(transactionsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return latestUnlocked(transactionsDir)
+}
+
+// Quarantine moves unreadable transaction metadata aside without deleting it.
+func Quarantine(id, transactionsDir string) (string, error) {
+	if !validTransactionID(id) || id == ".lock" {
+		return "", fmt.Errorf("invalid transaction id")
+	}
+	unlock, err := acquireLock(transactionsDir)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	source := filepath.Join(transactionsDir, id)
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("transaction is not a directory")
+	}
+	quarantineDir := filepath.Join(filepath.Dir(transactionsDir), "quarantine")
+	if err := os.MkdirAll(quarantineDir, 0700); err != nil {
+		return "", err
+	}
+	destination := filepath.Join(quarantineDir, id+"-"+time.Now().UTC().Format("20060102T150405Z"))
+	if err := renamePaths(source, destination, 0x00000004); err != nil { // RENAME_EXCL
+		return "", err
+	}
+	if err := syncDirectory(filepath.Dir(source)); err != nil {
+		return "", err
+	}
+	if err := syncDirectory(quarantineDir); err != nil {
+		return "", err
+	}
+	return destination, nil
+}
+
+func latestUnlocked(transactionsDir string) (*Journal, error) {
 	entries, err := os.ReadDir(transactionsDir)
 	if err != nil {
 		return nil, err
@@ -117,7 +158,10 @@ func Latest(transactionsDir string) (*Journal, error) {
 			continue
 		}
 		journal, err := loadJournal(filepath.Join(transactionsDir, entry.Name()))
-		if err != nil || (journal.Status != "applied" && journal.Status != "rollback-conflicts" && journal.Status != "partial") {
+		if err != nil {
+			return nil, fmt.Errorf("read transaction %s: %w", entry.Name(), err)
+		}
+		if journal.Status != "applied" && journal.Status != "rollback-conflicts" && journal.Status != "partial" && journal.Status != "preparing" {
 			continue
 		}
 		if latest == nil || journal.CreatedAt.After(latest.CreatedAt) {
@@ -130,30 +174,58 @@ func Latest(transactionsDir string) (*Journal, error) {
 	return latest, nil
 }
 
-// System runs platform commands used by preference and package transactions.
-type System interface {
-	Output(name string, args ...string) (string, error)
-	Run(name string, args ...string) error
+// RollbackLatest selects and rolls back the latest transaction under one lock.
+func RollbackLatest(homeDir, transactionsDir string) (*RollbackResult, error) {
+	unlock, err := acquireLock(transactionsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	latest, err := latestUnlocked(transactionsDir)
+	if err != nil {
+		return nil, err
+	}
+	return rollbackUnlocked(latest.ID, homeDir, transactionsDir)
 }
 
-type execSystem struct{}
-
-func (execSystem) Output(name string, args ...string) (string, error) {
-	output, err := exec.Command(name, args...).CombinedOutput()
-	return strings.TrimSpace(string(output)), err
+// FormatApplySummary renders the canonical apply completion summary.
+func FormatApplySummary(journal *Journal) string {
+	return fmt.Sprintf("Migration Apply Summary\n=======================\nTransaction: %s\nRoot dotfiles applied: %d\nApplications: preview-only\nPreferences: preview-only\n\nRollback with: wave rollback --transaction %s --confirm\n",
+		journal.ID, len(journal.Files), journal.ID)
 }
 
-func (execSystem) Run(name string, args ...string) error {
-	return exec.Command(name, args...).Run()
+// FormatRollbackSummary renders the canonical rollback completion summary.
+func FormatRollbackSummary(result *RollbackResult) string {
+	var summary strings.Builder
+	summary.WriteString("Migration Rollback Summary\n")
+	summary.WriteString("==========================\n")
+	fmt.Fprintf(&summary, "Transaction: %s\n", result.TransactionID)
+	fmt.Fprintf(&summary, "Files restored: %d\n", result.Restored)
+	fmt.Fprintf(&summary, "Files removed: %d\n", result.Removed)
+	fmt.Fprintf(&summary, "Conflicts preserved: %d\n", result.Conflicts)
+	if result.Conflicts > 0 {
+		summary.WriteString("\nConflicts require manual resolution:\n")
+		for _, path := range result.ConflictPaths {
+			fmt.Fprintf(&summary, "- %s\n", path)
+		}
+	}
+	return summary.String()
 }
 
 // Apply atomically applies file payloads and persists a write-ahead journal.
 func Apply(bundlePath, homeDir, transactionsDir string) (*Journal, error) {
-	return ApplyWithSystem(bundlePath, homeDir, transactionsDir, execSystem{})
+	unlock, err := acquireLock(transactionsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return applyUnlocked(bundlePath, homeDir, transactionsDir)
 }
 
-// ApplyWithSystem applies a bundle using the supplied platform command boundary.
-func ApplyWithSystem(bundlePath, homeDir, transactionsDir string, system System) (*Journal, error) {
+func applyUnlocked(bundlePath, homeDir, transactionsDir string) (*Journal, error) {
+	if err := recoverUnfinished(homeDir, transactionsDir); err != nil {
+		return nil, err
+	}
 	opened, err := bundle.Open(bundlePath)
 	if err != nil {
 		return nil, err
@@ -168,63 +240,124 @@ func ApplyWithSystem(bundlePath, homeDir, transactionsDir string, system System)
 	if err := os.MkdirAll(filepath.Join(dir, "before"), 0700); err != nil {
 		return nil, err
 	}
-	journal := &Journal{ID: id, CreatedAt: time.Now().UTC(), Status: "preparing", Files: []FileJournal{}, Preferences: []PreferenceJournal{}, Packages: []PackageJournal{}}
+	if err := os.MkdirAll(filepath.Join(dir, "preserved"), 0700); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "staged"), 0700); err != nil {
+		return nil, err
+	}
+	waveDir := filepath.Dir(transactionsDir)
+	if err := syncDirectory(filepath.Dir(waveDir)); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(waveDir); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(transactionsDir); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(dir); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(filepath.Join(dir, "before")); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(filepath.Join(dir, "preserved")); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(filepath.Join(dir, "staged")); err != nil {
+		return nil, err
+	}
+	journal := &Journal{Version: 1, ID: id, CreatedAt: time.Now().UTC(), Status: "preparing", Files: []FileJournal{}}
 	if err := saveJournal(dir, journal); err != nil {
 		return nil, err
 	}
 
+	// Prepare and identify every candidate before mutating any destination.
 	for i, file := range opened.Manifest.Files {
 		destination, err := destinationPath(homeDir, file.Destination)
 		if err != nil {
-			return recoverPartial(journal, homeDir, dir, system, err)
+			return journal, err
 		}
 		data, err := opened.ReadFile(file)
 		if err != nil {
-			return recoverPartial(journal, homeDir, dir, system, err)
+			return journal, err
 		}
 		record := FileJournal{
 			Destination: file.Destination,
 			AppliedHash: file.SHA256,
 			AppliedMode: file.Mode,
+			Staged:      filepath.ToSlash(filepath.Join("staged", fmt.Sprintf("%06d", i))),
+		}
+		stagedPath := filepath.Join(dir, filepath.FromSlash(record.Staged))
+		if err := writeAtomic(stagedPath, data, file.Mode); err != nil {
+			return journal, err
+		}
+		_, _, record.AppliedDevice, record.AppliedInode, err = fileIdentity(stagedPath)
+		if err != nil {
+			return journal, err
+		}
+		linkInfo, linkErr := os.Lstat(destination)
+		if linkErr == nil && linkInfo.Mode()&os.ModeSymlink != 0 {
+			return journal, fmt.Errorf("destination symlinks are not supported: %s", destination)
+		}
+		if linkErr != nil && !os.IsNotExist(linkErr) {
+			return journal, linkErr
 		}
 		if info, err := os.Stat(destination); err == nil {
 			if !info.Mode().IsRegular() {
-				return recoverPartial(journal, homeDir, dir, system, fmt.Errorf("destination is not a regular file: %s", destination))
+				return journal, fmt.Errorf("destination is not a regular file: %s", destination)
 			}
 			record.Existed = true
 			record.BeforeMode = info.Mode().Perm()
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return journal, fmt.Errorf("cannot identify original inode: %s", destination)
+			}
+			record.BeforeDevice = uint64(stat.Dev)
+			record.BeforeInode = stat.Ino
 			record.Before = filepath.ToSlash(filepath.Join("before", fmt.Sprintf("%06d", i)))
+			record.PreservedBefore = filepath.ToSlash(filepath.Join("preserved", fmt.Sprintf("before-%06d", i)))
 			beforeData, err := os.ReadFile(destination)
 			if err != nil {
-				return recoverPartial(journal, homeDir, dir, system, err)
+				return journal, err
 			}
 			beforeHash := sha256.Sum256(beforeData)
 			record.BeforeHash = hex.EncodeToString(beforeHash[:])
 			if err := writeAtomic(filepath.Join(dir, filepath.FromSlash(record.Before)), beforeData, 0600); err != nil {
-				return recoverPartial(journal, homeDir, dir, system, err)
+				return journal, err
 			}
 		} else if !os.IsNotExist(err) {
-			return recoverPartial(journal, homeDir, dir, system, err)
-		}
-		journal.Files = append(journal.Files, record)
-		if err := saveJournal(dir, journal); err != nil {
-			return recoverPartial(journal, homeDir, dir, system, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
-			return recoverPartial(journal, homeDir, dir, system, err)
-		}
-		if err := writeAtomic(destination, data, file.Mode); err != nil {
-			journal.Status = "partial"
-			_ = saveJournal(dir, journal)
-			_, _ = rollbackJournal(journal, homeDir, dir, system)
 			return journal, err
 		}
+		journal.Files = append(journal.Files, record)
 	}
-	if err := applyPreferences(journal, opened.Manifest.State, system, dir); err != nil {
-		return recoverPartial(journal, homeDir, dir, system, err)
+	if err := saveJournal(dir, journal); err != nil {
+		return journal, err
 	}
-	if err := applyPackages(journal, opened.Manifest.State, system, dir); err != nil {
-		return recoverPartial(journal, homeDir, dir, system, err)
+
+	for i := range journal.Files {
+		record := &journal.Files[i]
+		destination, err := destinationPath(homeDir, record.Destination)
+		if err != nil {
+			return recoverPartial(journal, homeDir, dir, err)
+		}
+		record.Applying = true
+		if err := saveJournal(dir, journal); err != nil {
+			return recoverPartial(journal, homeDir, dir, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+			return recoverPartial(journal, homeDir, dir, err)
+		}
+		err = swapInFile(destination, *record, dir)
+		if err != nil {
+			return recoverPartial(journal, homeDir, dir, err)
+		}
+		record.Applied = true
+		record.Applying = false
+		if err := saveJournal(dir, journal); err != nil {
+			return recoverPartial(journal, homeDir, dir, err)
+		}
 	}
 	journal.Status = "applied"
 	if err := saveJournal(dir, journal); err != nil {
@@ -235,12 +368,16 @@ func ApplyWithSystem(bundlePath, homeDir, transactionsDir string, system System)
 
 // Rollback restores items that still match the state written by Apply.
 func Rollback(id, homeDir, transactionsDir string) (*RollbackResult, error) {
-	return RollbackWithSystem(id, homeDir, transactionsDir, execSystem{})
+	unlock, err := acquireLock(transactionsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return rollbackUnlocked(id, homeDir, transactionsDir)
 }
 
-// RollbackWithSystem rolls back a transaction using the supplied command boundary.
-func RollbackWithSystem(id, homeDir, transactionsDir string, system System) (*RollbackResult, error) {
-	if id == "" || filepath.Base(id) != id {
+func rollbackUnlocked(id, homeDir, transactionsDir string) (*RollbackResult, error) {
+	if !validTransactionID(id) {
 		return nil, fmt.Errorf("invalid transaction id")
 	}
 	dir := filepath.Join(transactionsDir, id)
@@ -248,77 +385,14 @@ func RollbackWithSystem(id, homeDir, transactionsDir string, system System) (*Ro
 	if err != nil {
 		return nil, err
 	}
-	if journal.Status != "applied" && journal.Status != "rollback-conflicts" && journal.Status != "partial" {
+	if journal.Status != "applied" && journal.Status != "rollback-conflicts" && journal.Status != "partial" && journal.Status != "preparing" {
 		return nil, fmt.Errorf("transaction cannot be rolled back from status %s", journal.Status)
 	}
-	return rollbackJournal(journal, homeDir, dir, system)
+	return rollbackJournal(journal, homeDir, dir)
 }
 
-func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*RollbackResult, error) {
+func rollbackJournal(journal *Journal, homeDir, dir string) (*RollbackResult, error) {
 	result := &RollbackResult{TransactionID: journal.ID, ConflictPaths: []string{}}
-	for i := len(journal.Packages) - 1; i >= 0; i-- {
-		record := &journal.Packages[i]
-		if record.RolledBack {
-			continue
-		}
-		version, installed := packageVersion(system, record.Manager, record.Name, record.Type)
-		if !record.Applied {
-			if !installed {
-				record.RolledBack = true
-				if err := saveJournal(dir, journal); err != nil {
-					return result, err
-				}
-				continue
-			}
-			result.Conflicts++
-			result.ConflictPaths = append(result.ConflictPaths, "package:"+record.Name)
-			continue
-		}
-		if !installed || (record.AppliedVersion != "" && version != record.AppliedVersion) {
-			result.Conflicts++
-			result.ConflictPaths = append(result.ConflictPaths, "package:"+record.Name)
-			continue
-		}
-		if err := uninstallPackage(system, *record); err != nil {
-			return result, err
-		}
-		record.RolledBack = true
-		result.PackagesRemoved++
-		if err := saveJournal(dir, journal); err != nil {
-			return result, err
-		}
-	}
-	for i := len(journal.Preferences) - 1; i >= 0; i-- {
-		record := &journal.Preferences[i]
-		if record.RolledBack {
-			continue
-		}
-		current, err := readPreference(system, record.Domain, record.Key)
-		if err == nil && current.Existed == record.Existed && (!current.Existed || (current.Type == record.BeforeType && current.Value == record.BeforeValue)) {
-			record.RolledBack = true
-			if err := saveJournal(dir, journal); err != nil {
-				return result, err
-			}
-			continue
-		}
-		if err != nil || !current.Existed || current.Type != record.AppliedType || current.Value != record.AppliedValue {
-			result.Conflicts++
-			result.ConflictPaths = append(result.ConflictPaths, "preference:"+record.Domain+":"+record.Key)
-			continue
-		}
-		if record.Existed {
-			if err := writePreference(system, record.Domain, record.Key, record.BeforeType, record.BeforeValue); err != nil {
-				return result, err
-			}
-		} else if err := system.Run("defaults", "delete", record.Domain, record.Key); err != nil {
-			return result, err
-		}
-		record.RolledBack = true
-		result.PreferencesRestored++
-		if err := saveJournal(dir, journal); err != nil {
-			return result, err
-		}
-	}
 	for i := len(journal.Files) - 1; i >= 0; i-- {
 		record := &journal.Files[i]
 		if record.RolledBack {
@@ -328,8 +402,36 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 		if err != nil {
 			return result, err
 		}
-		currentHash, currentMode, err := fileState(destination)
-		if err == nil && record.Existed && currentHash == record.BeforeHash && currentMode == record.BeforeMode {
+		currentHash, currentMode, currentDevice, currentInode, err := fileIdentity(destination)
+		if !record.Applied {
+			if err == nil && record.Existed && currentHash == record.BeforeHash && currentMode == record.BeforeMode && currentDevice == record.BeforeDevice && currentInode == record.BeforeInode {
+				record.RolledBack = true
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if os.IsNotExist(err) && !record.Existed {
+				record.RolledBack = true
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if record.Applying && err == nil && currentHash == record.AppliedHash && currentMode == record.AppliedMode && currentDevice == record.AppliedDevice && currentInode == record.AppliedInode {
+				record.Applied = true
+				record.Applying = false
+			} else {
+				result.Conflicts++
+				result.ConflictPaths = append(result.ConflictPaths, record.Destination)
+				journal.Status = "rollback-conflicts"
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
+			}
+		}
+		if err == nil && record.Existed && currentHash == record.BeforeHash && currentMode == record.BeforeMode && currentDevice == record.BeforeDevice && currentInode == record.BeforeInode {
 			record.RolledBack = true
 			if err := saveJournal(dir, journal); err != nil {
 				return result, err
@@ -337,30 +439,73 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 			continue
 		}
 		if os.IsNotExist(err) && !record.Existed {
+			if record.PreservedApplied != "" {
+				preserved := filepath.Join(dir, filepath.FromSlash(record.PreservedApplied))
+				_, _, device, inode, preservedErr := fileIdentity(preserved)
+				if preservedErr != nil || device != record.AppliedDevice || inode != record.AppliedInode {
+					result.Conflicts++
+					result.ConflictPaths = append(result.ConflictPaths, record.Destination)
+					journal.Status = "rollback-conflicts"
+					if err := saveJournal(dir, journal); err != nil {
+						return result, err
+					}
+					continue
+				}
+			}
 			record.RolledBack = true
 			if err := saveJournal(dir, journal); err != nil {
 				return result, err
 			}
 			continue
 		}
-		if err != nil || currentHash != record.AppliedHash || currentMode != record.AppliedMode {
+		if err != nil || currentHash != record.AppliedHash || currentMode != record.AppliedMode || currentDevice != record.AppliedDevice || currentInode != record.AppliedInode {
 			result.Conflicts++
 			result.ConflictPaths = append(result.ConflictPaths, record.Destination)
+			journal.Status = "rollback-conflicts"
+			if err := saveJournal(dir, journal); err != nil {
+				return result, err
+			}
 			continue
 		}
 		if !record.Existed {
-			if err := os.Remove(destination); err != nil {
+			record.PreservedApplied = filepath.ToSlash(filepath.Join("preserved", fmt.Sprintf("applied-%06d", i)))
+			if err := saveJournal(dir, journal); err != nil {
 				return result, err
+			}
+			preserved := filepath.Join(dir, filepath.FromSlash(record.PreservedApplied))
+			if err := os.Rename(destination, preserved); err != nil {
+				return result, err
+			}
+			if err := syncDirectory(filepath.Dir(destination)); err != nil {
+				return result, err
+			}
+			if err := syncDirectory(filepath.Dir(preserved)); err != nil {
+				return result, err
+			}
+			_, _, device, inode, err := fileIdentity(preserved)
+			if err != nil || device != record.AppliedDevice || inode != record.AppliedInode {
+				if restoreErr := renameNoReplace(preserved, destination); restoreErr != nil {
+					journal.Status = "rollback-conflicts"
+					if saveErr := saveJournal(dir, journal); saveErr != nil {
+						return result, saveErr
+					}
+					return result, fmt.Errorf("destination changed during rollback; concurrent file preserved at %s", preserved)
+				}
+				record.PreservedApplied = ""
+				result.Conflicts++
+				result.ConflictPaths = append(result.ConflictPaths, record.Destination)
+				journal.Status = "rollback-conflicts"
+				if err := saveJournal(dir, journal); err != nil {
+					return result, err
+				}
+				continue
 			}
 			result.Removed++
 		} else {
-			beforeData, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(record.Before)))
-			if err != nil {
+			if err := swapRollbackFile(destination, dir, record); err != nil {
 				return result, err
 			}
-			if err := writeAtomic(destination, beforeData, record.BeforeMode); err != nil {
-				return result, err
-			}
+			record.PreservedApplied = record.Staged
 			result.Restored++
 		}
 		record.RolledBack = true
@@ -379,187 +524,176 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 	return result, nil
 }
 
-func recoverPartial(journal *Journal, homeDir, dir string, system System, applyErr error) (*Journal, error) {
+func recoverPartial(journal *Journal, homeDir, dir string, applyErr error) (*Journal, error) {
 	journal.Status = "partial"
 	_ = saveJournal(dir, journal)
-	result, rollbackErr := rollbackJournal(journal, homeDir, dir, system)
+	result, rollbackErr := rollbackJournal(journal, homeDir, dir)
 	if rollbackErr != nil || result.Conflicts > 0 {
 		return journal, fmt.Errorf("apply failed: %w; automatic rollback incomplete", applyErr)
 	}
 	return journal, fmt.Errorf("apply failed and was rolled back: %w", applyErr)
 }
 
-type preferenceValue struct {
-	Existed bool
-	Type    string
-	Value   string
-}
-
-type preferenceSpec struct {
-	Domain string
-	Key    string
-	Type   string
-	Value  string
-}
-
-func applyPreferences(journal *Journal, state *models.MigrationState, system System, dir string) error {
-	for _, spec := range preferenceSpecs(state) {
-		before, err := readPreference(system, spec.Domain, spec.Key)
+func recoverUnfinished(homeDir, transactionsDir string) error {
+	entries, err := os.ReadDir(transactionsDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(transactionsDir, entry.Name())
+		journal, err := loadJournal(dir)
 		if err != nil {
-			return err
+			return fmt.Errorf("read transaction %s: %w", entry.Name(), err)
 		}
-		record := PreferenceJournal{Domain: spec.Domain, Key: spec.Key, Existed: before.Existed, BeforeType: before.Type, BeforeValue: before.Value, AppliedType: spec.Type, AppliedValue: spec.Value}
-		journal.Preferences = append(journal.Preferences, record)
-		if err := saveJournal(dir, journal); err != nil {
-			return err
+		if journal.Status != "preparing" && journal.Status != "partial" {
+			if journal.Status == "rollback-conflicts" {
+				return fmt.Errorf("unfinished transaction %s requires rollback resolution", journal.ID)
+			}
+			continue
 		}
-		if err := writePreference(system, spec.Domain, spec.Key, spec.Type, spec.Value); err != nil {
-			return err
+		result, err := rollbackJournal(journal, homeDir, dir)
+		if err != nil || result.Conflicts > 0 {
+			return fmt.Errorf("unfinished transaction %s requires rollback resolution", journal.ID)
 		}
 	}
 	return nil
 }
 
-func preferenceSpecs(state *models.MigrationState) []preferenceSpec {
-	prefs := state.Preferences
-	specs := []preferenceSpec{
-		{Domain: "com.apple.finder", Key: "AppleShowAllFiles", Type: "bool", Value: strconv.FormatBool(prefs.Finder.ShowHiddenFiles)},
-		{Domain: "com.apple.dock", Key: "autohide", Type: "bool", Value: strconv.FormatBool(prefs.Dock.Autohide)},
-		{Domain: "com.apple.dock", Key: "show-recents", Type: "bool", Value: strconv.FormatBool(prefs.Dock.ShowRecents)},
+func swapInFile(destination string, record FileJournal, transactionDir string) error {
+	staged := filepath.Join(transactionDir, filepath.FromSlash(record.Staged))
+	if hash, mode, device, inode, err := fileIdentity(staged); err != nil || hash != record.AppliedHash || mode != record.AppliedMode || device != record.AppliedDevice || inode != record.AppliedInode {
+		return fmt.Errorf("staged candidate does not match journal: %s", record.Destination)
 	}
+	if !record.Existed {
+		if err := os.Link(staged, destination); err != nil {
+			return fmt.Errorf("destination appeared during apply: %s", record.Destination)
+		}
+		return syncDirectory(filepath.Dir(destination))
+	}
+	if err := swapPaths(destination, staged); err != nil {
+		return err
+	}
+	hash, oldMode, oldDevice, oldInode, err := fileIdentity(staged)
+	if err != nil || hash != record.BeforeHash || oldMode != record.BeforeMode || oldDevice != record.BeforeDevice || oldInode != record.BeforeInode {
+		displacedHash := hash
+		displacedMode := oldMode
+		if restoreErr := swapPaths(destination, staged); restoreErr != nil {
+			return fmt.Errorf("destination changed during apply; displaced file preserved at %s: %w", staged, restoreErr)
+		}
+		restoredHash, restoredMode, restoreErr := fileStateRegular(destination)
+		if restoreErr != nil || restoredHash != displacedHash || restoredMode != displacedMode {
+			return fmt.Errorf("could not verify restored concurrent file; candidate preserved at %s", staged)
+		}
+		return fmt.Errorf("destination changed during apply; candidate preserved at %s", staged)
+	}
+	if err := syncDirectory(filepath.Dir(destination)); err != nil {
+		return fmt.Errorf("apply swap was not durably synced; displaced file preserved at %s: %w", staged, err)
+	}
+	return syncDirectory(filepath.Dir(staged))
+}
+
+func swapRollbackFile(destination, transactionDir string, record *FileJournal) error {
+	preserved := filepath.Join(transactionDir, filepath.FromSlash(record.Staged))
+	beforeHash, beforeMode, beforeDevice, beforeInode, err := fileIdentity(preserved)
+	if err != nil || beforeHash != record.BeforeHash || beforeMode != record.BeforeMode || beforeDevice != record.BeforeDevice || beforeInode != record.BeforeInode {
+		return fmt.Errorf("preserved original does not match journal: %s", record.Destination)
+	}
+	if err := swapPaths(destination, preserved); err != nil {
+		return err
+	}
+	hash, appliedMode, appliedDevice, appliedInode, err := fileIdentity(preserved)
+	if err != nil || hash != record.AppliedHash || appliedMode != record.AppliedMode || appliedDevice != record.AppliedDevice || appliedInode != record.AppliedInode {
+		displacedHash := hash
+		displacedMode := appliedMode
+		if restoreErr := swapPaths(destination, preserved); restoreErr != nil {
+			return fmt.Errorf("destination changed during rollback; displaced file preserved at %s: %w", preserved, restoreErr)
+		}
+		restoredHash, restoredMode, restoreErr := fileStateRegular(destination)
+		if restoreErr != nil || restoredHash != displacedHash || restoredMode != displacedMode {
+			return fmt.Errorf("could not verify restored concurrent file; rollback candidate preserved at %s", preserved)
+		}
+		return fmt.Errorf("destination changed during rollback; candidate preserved at %s", preserved)
+	}
+	if err := syncDirectory(filepath.Dir(destination)); err != nil {
+		return fmt.Errorf("rollback swap was not durably synced; applied file preserved at %s: %w", preserved, err)
+	}
+	return syncDirectory(filepath.Dir(preserved))
+}
+
+func swapPaths(first, second string) error {
+	return renamePaths(first, second, 0x00000002) // RENAME_SWAP
+}
+
+func renameExclusive(first, second string) error {
+	return renamePaths(first, second, 0x00000004|0x00000010) // RENAME_EXCL | RENAME_NOFOLLOW_ANY
+}
+
+func renameNoReplace(first, second string) error {
+	return renamePaths(first, second, 0x00000004) // RENAME_EXCL
+}
+
+func renamePaths(first, second string, flags uintptr) error {
+	atFDCWD := int32(-2)
+	firstPointer, err := syscall.BytePtrFromString(first)
+	if err != nil {
+		return err
+	}
+	secondPointer, err := syscall.BytePtrFromString(second)
+	if err != nil {
+		return err
+	}
+	_, _, errno := syscall.Syscall6(
+		unix.SYS_RENAMEATX_NP,
+		uintptr(atFDCWD),
+		uintptr(unsafe.Pointer(firstPointer)),
+		uintptr(atFDCWD),
+		uintptr(unsafe.Pointer(secondPointer)),
+		flags,
+		0,
+	)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func countPreferences(state *models.MigrationState) int {
+	prefs := state.Preferences
+	count := 3 // Finder hidden files, Dock autohide, Dock recents.
 	if prefs.Finder.DefaultViewMode != "" {
-		specs = append(specs, preferenceSpec{Domain: "com.apple.finder", Key: "FXPreferredViewStyle", Type: "string", Value: prefs.Finder.DefaultViewMode})
+		count++
 	}
 	if prefs.Dock.Position != "" {
-		specs = append(specs, preferenceSpec{Domain: "com.apple.dock", Key: "orientation", Type: "string", Value: prefs.Dock.Position})
+		count++
 	}
 	if prefs.Keyboard.KeyRepeat > 0 {
-		specs = append(specs, preferenceSpec{Domain: "-g", Key: "KeyRepeat", Type: "int", Value: strconv.Itoa(prefs.Keyboard.KeyRepeat)})
+		count++
 	}
 	if prefs.Keyboard.InitialRepeat > 0 {
-		specs = append(specs, preferenceSpec{Domain: "-g", Key: "InitialKeyRepeat", Type: "int", Value: strconv.Itoa(prefs.Keyboard.InitialRepeat)})
+		count++
 	}
-	return specs
+	return count
 }
 
-func readPreference(system System, domain, key string) (preferenceValue, error) {
-	value, err := system.Output("defaults", "read", domain, key)
+func acquireLock(transactionsDir string) (func(), error) {
+	if err := os.MkdirAll(transactionsDir, 0700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(filepath.Join(transactionsDir, ".lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return preferenceValue{Existed: false}, nil
+		return nil, err
 	}
-	typeOutput, err := system.Output("defaults", "read-type", domain, key)
-	if err != nil {
-		return preferenceValue{}, err
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("another apply or rollback operation is running")
 	}
-	return preferenceValue{Existed: true, Type: preferenceType(typeOutput), Value: normalizePreference(preferenceType(typeOutput), value)}, nil
-}
-
-func preferenceType(output string) string {
-	lower := strings.ToLower(output)
-	switch {
-	case strings.Contains(lower, "boolean"):
-		return "bool"
-	case strings.Contains(lower, "integer"):
-		return "int"
-	case strings.Contains(lower, "float"):
-		return "float"
-	default:
-		return "string"
-	}
-}
-
-func normalizePreference(kind, value string) string {
-	value = strings.TrimSpace(value)
-	if kind == "bool" {
-		return strconv.FormatBool(value == "1" || strings.EqualFold(value, "true"))
-	}
-	return value
-}
-
-func writePreference(system System, domain, key, kind, value string) error {
-	flag := "-" + kind
-	return system.Run("defaults", "write", domain, key, flag, value)
-}
-
-func applyPackages(journal *Journal, state *models.MigrationState, system System, dir string) error {
-	for _, pkg := range state.Applications.Homebrew {
-		if _, installed := packageVersion(system, "homebrew", pkg.Name, pkg.Type); installed {
-			continue
-		}
-		args := []string{"install"}
-		if pkg.Type == "cask" {
-			args = append(args, "--cask")
-		}
-		args = append(args, pkg.Name)
-		journal.Packages = append(journal.Packages, PackageJournal{Manager: "homebrew", Name: pkg.Name, Type: pkg.Type})
-		record := &journal.Packages[len(journal.Packages)-1]
-		if err := saveJournal(dir, journal); err != nil {
-			return err
-		}
-		if err := system.Run("brew", args...); err != nil {
-			return err
-		}
-		version, _ := packageVersion(system, "homebrew", pkg.Name, pkg.Type)
-		record.Applied = true
-		record.AppliedVersion = version
-		if err := saveJournal(dir, journal); err != nil {
-			return err
-		}
-	}
-	for _, extension := range state.Applications.VSCodeExtensions {
-		if _, installed := packageVersion(system, "vscode", extension, "extension"); installed {
-			continue
-		}
-		journal.Packages = append(journal.Packages, PackageJournal{Manager: "vscode", Name: extension, Type: "extension"})
-		record := &journal.Packages[len(journal.Packages)-1]
-		if err := saveJournal(dir, journal); err != nil {
-			return err
-		}
-		if err := system.Run("code", "--install-extension", extension); err != nil {
-			return err
-		}
-		record.Applied = true
-		if err := saveJournal(dir, journal); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func packageVersion(system System, manager, name, kind string) (string, bool) {
-	if manager == "vscode" {
-		output, err := system.Output("code", "--list-extensions")
-		if err != nil {
-			return "", false
-		}
-		for _, extension := range strings.Split(output, "\n") {
-			if strings.EqualFold(strings.TrimSpace(extension), name) {
-				return "", true
-			}
-		}
-		return "", false
-	}
-	args := []string{"list"}
-	if kind == "cask" {
-		args = append(args, "--cask")
-	}
-	args = append(args, "--versions", name)
-	output, err := system.Output("brew", args...)
-	if err != nil || strings.TrimSpace(output) == "" {
-		return "", false
-	}
-	return strings.TrimSpace(output), true
-}
-
-func uninstallPackage(system System, pkg PackageJournal) error {
-	if pkg.Manager == "vscode" {
-		return system.Run("code", "--uninstall-extension", pkg.Name)
-	}
-	args := []string{"uninstall"}
-	if pkg.Type == "cask" {
-		args = append(args, "--cask")
-	}
-	return system.Run("brew", append(args, pkg.Name)...)
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 func transactionID() (string, error) {
@@ -568,6 +702,10 @@ func transactionID() (string, error) {
 		return "", err
 	}
 	return time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(random), nil
+}
+
+func validTransactionID(id string) bool {
+	return id != "" && id != "." && id != ".." && !filepath.IsAbs(id) && !strings.ContainsAny(id, `/\`) && filepath.Base(id) == id
 }
 
 func destinationPath(homeDir, relative string) (string, error) {
@@ -627,10 +765,142 @@ func loadJournal(dir string) (*Journal, error) {
 		return nil, err
 	}
 	journal := &Journal{}
-	if err := json.Unmarshal(data, journal); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(journal); err != nil {
+		migrated, migrateErr := migrateLegacyJournal(dir, data)
+		if migrateErr != nil {
+			return nil, err
+		}
+		journal = migrated
+	}
+	if journal.Version == 0 {
+		migrated, err := migrateLegacyJournal(dir, data)
+		if err != nil {
+			return nil, err
+		}
+		journal = migrated
+	}
+	if journal.Version != 1 {
+		return nil, fmt.Errorf("unsupported transaction journal version")
+	}
+	if err := validateJournal(dir, journal); err != nil {
 		return nil, err
 	}
 	return journal, nil
+}
+
+func migrateLegacyJournal(dir string, data []byte) (*Journal, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{"id": true, "created_at": true, "status": true, "files": true}
+	for key := range raw {
+		if !allowed[key] {
+			return nil, fmt.Errorf("unsupported legacy transaction field: %s", key)
+		}
+	}
+	legacy := &Journal{}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(legacy); err != nil {
+		return nil, err
+	}
+	legacy.Version = 1
+	if len(legacy.Files) > 0 {
+		return nil, fmt.Errorf("legacy file-changing journal requires quarantine and manual recovery")
+	}
+	if err := validateJournal(dir, legacy); err != nil {
+		return nil, err
+	}
+	if err := saveJournal(dir, legacy); err != nil {
+		return nil, err
+	}
+	return legacy, nil
+}
+
+func validateJournal(dir string, journal *Journal) error {
+	if journal.ID == "" || journal.ID != filepath.Base(dir) || journal.CreatedAt.IsZero() {
+		return fmt.Errorf("invalid transaction identity")
+	}
+	validStatus := map[string]bool{"preparing": true, "partial": true, "applied": true, "rollback-conflicts": true, "rolled-back": true}
+	if !validStatus[journal.Status] {
+		return fmt.Errorf("invalid transaction status")
+	}
+	destinations := make(map[string]bool)
+	for i, file := range journal.Files {
+		if file.Destination == "" || !immediateJournalDotfile(file.Destination) || destinations[file.Destination] {
+			return fmt.Errorf("invalid transaction destination")
+		}
+		destinations[file.Destination] = true
+		if !validHash(file.AppliedHash) || file.AppliedMode.Perm() == 0 || file.AppliedMode.Perm() > 0777 {
+			return fmt.Errorf("invalid applied file state")
+		}
+		expectedStaged := filepath.ToSlash(filepath.Join("staged", fmt.Sprintf("%06d", i)))
+		if file.Staged != expectedStaged || file.AppliedDevice == 0 || file.AppliedInode == 0 {
+			return fmt.Errorf("invalid staged file state")
+		}
+		if file.Existed {
+			expectedBefore := filepath.ToSlash(filepath.Join("before", fmt.Sprintf("%06d", i)))
+			expectedPreserved := filepath.ToSlash(filepath.Join("preserved", fmt.Sprintf("before-%06d", i)))
+			if file.Before != expectedBefore || file.PreservedBefore != expectedPreserved || !validHash(file.BeforeHash) || file.BeforeMode.Perm() == 0 || file.BeforeMode.Perm() > 0777 || file.BeforeDevice == 0 || file.BeforeInode == 0 {
+				return fmt.Errorf("invalid before file state")
+			}
+			beforePath := filepath.Join(dir, filepath.FromSlash(file.Before))
+			hash, mode, err := fileState(beforePath)
+			if err != nil || hash != file.BeforeHash || mode != 0600 {
+				return fmt.Errorf("transaction backup does not match journal")
+			}
+			preservedPath := filepath.Join(dir, filepath.FromSlash(file.Staged))
+			preservedInfo, err := os.Lstat(preservedPath)
+			if err != nil || !preservedInfo.Mode().IsRegular() {
+				return fmt.Errorf("preserved transaction inode is missing")
+			}
+			stat, ok := preservedInfo.Sys().(*syscall.Stat_t)
+			if !ok {
+				return fmt.Errorf("cannot identify preserved transaction inode")
+			}
+			preservedDevice := uint64(stat.Dev)
+			preservedInode := stat.Ino
+			matchesBefore := preservedDevice == file.BeforeDevice && preservedInode == file.BeforeInode
+			matchesApplied := file.AppliedDevice != 0 && preservedDevice == file.AppliedDevice && preservedInode == file.AppliedInode
+			if !matchesBefore && !matchesApplied {
+				return fmt.Errorf("preserved inode does not match transaction journal")
+			}
+		} else if file.Before != "" || file.BeforeHash != "" || file.BeforeMode != 0 || file.BeforeDevice != 0 || file.BeforeInode != 0 || file.PreservedBefore != "" {
+			return fmt.Errorf("unexpected before state for new file")
+		}
+		if !file.Existed {
+			expectedPreservedApplied := filepath.ToSlash(filepath.Join("preserved", fmt.Sprintf("applied-%06d", i)))
+			if file.PreservedApplied != "" && file.PreservedApplied != expectedPreservedApplied {
+				return fmt.Errorf("invalid preserved applied path")
+			}
+			stagedPath := filepath.Join(dir, filepath.FromSlash(file.Staged))
+			info, statErr := os.Lstat(stagedPath)
+			if statErr != nil || !info.Mode().IsRegular() {
+				return fmt.Errorf("staged transaction inode is missing")
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || uint64(stat.Dev) != file.AppliedDevice || stat.Ino != file.AppliedInode {
+				return fmt.Errorf("staged transaction inode does not match journal")
+			}
+		}
+	}
+	return nil
+}
+
+func immediateJournalDotfile(path string) bool {
+	clean := filepath.Clean(filepath.FromSlash(path))
+	return !filepath.IsAbs(clean) && bundle.VettedDotfile(clean)
+}
+
+func validHash(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func fileState(path string) (string, os.FileMode, error) {
@@ -644,6 +914,33 @@ func fileState(path string) (string, os.FileMode, error) {
 	}
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:]), info.Mode().Perm(), nil
+}
+
+func fileStateRegular(path string) (string, os.FileMode, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", 0, fmt.Errorf("path is not a regular file: %s", path)
+	}
+	return fileState(path)
+}
+
+func fileIdentity(path string) (string, os.FileMode, uint64, uint64, error) {
+	hash, mode, err := fileStateRegular(path)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", 0, 0, 0, fmt.Errorf("cannot identify inode: %s", path)
+	}
+	return hash, mode, uint64(stat.Dev), stat.Ino, nil
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
@@ -671,7 +968,11 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tempPath, path); err != nil {
 		return err
 	}
-	directory, err := os.Open(filepath.Dir(path))
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
 	if err != nil {
 		return err
 	}

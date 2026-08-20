@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -40,6 +41,7 @@ type Model struct {
 	version     string
 	width       int
 	height      int
+	pending     cmdType
 }
 
 // InitialModel creates a new model
@@ -49,8 +51,9 @@ func InitialModel(version string) Model {
 		choices: []string{
 			"Capture Device State",
 			"Preview Migration (Dry Run)",
-			"View Captured State",
-			"Verify Migration",
+			"Apply Migration",
+			"Rollback Latest Migration",
+			"View Captured Archive",
 			"Exit",
 		},
 		selected: make(map[int]bool),
@@ -81,6 +84,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.pending != "" {
+			switch msg.String() {
+			case "y", "Y":
+				pending := m.pending
+				m.pending = ""
+				m.status = fmt.Sprintf("Starting %s...", strings.ToLower(commandLabel(pending)))
+				return m, m.run(pending)
+			case "n", "N", "esc", "q":
+				m.pending = ""
+				m.status = "Operation cancelled"
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -104,12 +122,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Starting migration preview..."
 				return m, m.run(applyCmd)
 			case 2:
-				m.status = "Opening captured state..."
-				return m, m.run(viewCmd)
+				m.pending = liveApplyCmd
+				m.status = "Apply this archive to the machine? Press y to confirm or n to cancel."
+				return m, nil
 			case 3:
-				m.status = "Starting verification..."
-				return m, m.run(verifyCmd)
+				m.pending = rollbackCmd
+				m.status = "Rollback the latest migration? Press y to confirm or n to cancel."
+				return m, nil
 			case 4:
+				m.status = "Opening captured archive..."
+				return m, m.run(viewCmd)
+			case 5:
 				return m, tea.Quit
 			}
 		}
@@ -147,10 +170,11 @@ func (m Model) View() string {
 type cmdType string
 
 const (
-	captureCmd cmdType = "capture"
-	applyCmd   cmdType = "apply"
-	viewCmd    cmdType = "view"
-	verifyCmd  cmdType = "verify"
+	captureCmd   cmdType = "capture"
+	applyCmd     cmdType = "apply"
+	liveApplyCmd cmdType = "live-apply"
+	rollbackCmd  cmdType = "rollback"
+	viewCmd      cmdType = "view"
 )
 
 // runCommand suspends the TUI while the selected workflow uses the terminal.
@@ -165,7 +189,7 @@ func runCommand(cmd cmdType) tea.Cmd {
 		return commandResult(cmd, err)
 	}
 
-	process, err := commandFor(cmd, executable, filepath.Join(homeDir, "wave-state.yaml"))
+	process, err := commandFor(cmd, executable, filepath.Join(homeDir, "wave-state.wave"))
 	if err != nil {
 		return commandResult(cmd, err)
 	}
@@ -181,10 +205,12 @@ func commandFor(cmd cmdType, executable, statePath string) (*exec.Cmd, error) {
 		return exec.Command(executable, "capture", "--output", statePath), nil
 	case applyCmd:
 		return exec.Command(executable, "apply", "--input", statePath, "--dry-run"), nil
+	case liveApplyCmd:
+		return exec.Command(executable, "apply", "--input", statePath, "--confirm"), nil
+	case rollbackCmd:
+		return exec.Command(executable, "rollback", "--confirm"), nil
 	case viewCmd:
 		return exec.Command("/usr/bin/less", statePath), nil
-	case verifyCmd:
-		return exec.Command(executable, "verify", "--input", statePath), nil
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -201,11 +227,13 @@ func commandLabel(cmd cmdType) string {
 	case captureCmd:
 		return "Capture"
 	case applyCmd:
+		return "Preview"
+	case liveApplyCmd:
 		return "Migration"
+	case rollbackCmd:
+		return "Rollback"
 	case viewCmd:
 		return "State viewer"
-	case verifyCmd:
-		return "Verification"
 	default:
 		return "Command"
 	}

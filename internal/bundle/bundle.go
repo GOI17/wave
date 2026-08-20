@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	"golang.org/x/sys/unix"
 	"wave/internal/models"
 )
 
@@ -22,6 +24,17 @@ const (
 	maxTotalSize  = 256 << 20
 	maxFileCount  = 10000
 )
+
+var credentialAssignment = regexp.MustCompile(`(?i)["']?[A-Za-z0-9_./-]*(token|secret|password|credential|private[_-]?key|api[_-]?key|auth)[A-Za-z0-9_./-]*["']?\s*[:=]`)
+var credentialURL = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s/:]+:[^\s/@]+@`)
+var credentialTokenURL = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s/@]+@`)
+var netrcCredential = regexp.MustCompile(`(?is)\bmachine\s+\S+.*\b(?:login|password|account)\s+\S+`)
+var knownTokenValue = regexp.MustCompile(`(?i)(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|sk_(?:live|test)_[A-Za-z0-9]{20,})`)
+var vettedDotfiles = map[string]bool{
+	".zshrc": true, ".bashrc": true, ".bash_profile": true, ".zsh_profile": true,
+	".gitconfig": true, ".vimrc": true, ".tmux.conf": true, ".editorconfig": true,
+	".prettierrc": true, ".eslintrc.json": true, ".gitignore_global": true,
+}
 
 // Manifest describes the portable contents of a .wave archive.
 type Manifest struct {
@@ -121,27 +134,29 @@ func Create(path, homeDir string, state *models.MigrationState) error {
 
 func collectFile(homeDir, source string) (File, []byte, bool) {
 	relative, err := filepath.Rel(homeDir, source)
-	if err != nil || unsafePath(relative) || sensitivePath(relative) {
+	if err != nil || unsafePath(relative) || !VettedDotfile(relative) || sensitivePath(relative) {
 		return File{}, nil, false
 	}
-	resolvedHome, err := filepath.EvalSymlinks(homeDir)
+	homeFD, err := unix.Open(homeDir, unix.O_RDONLY, 0)
 	if err != nil {
 		return File{}, nil, false
 	}
-	resolvedSource, err := filepath.EvalSymlinks(source)
+	defer unix.Close(homeFD)
+	fd, err := unix.Openat(homeFD, filepath.Base(relative), unix.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return File{}, nil, false
 	}
-	resolvedRelative, err := filepath.Rel(resolvedHome, resolvedSource)
-	if err != nil || unsafePath(resolvedRelative) {
-		return File{}, nil, false
-	}
-	info, err := os.Stat(resolvedSource)
+	fileHandle := os.NewFile(uintptr(fd), source)
+	defer fileHandle.Close()
+	info, err := fileHandle.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxFileSize {
 		return File{}, nil, false
 	}
-	data, err := os.ReadFile(resolvedSource)
+	data, err := io.ReadAll(io.LimitReader(fileHandle, maxFileSize+1))
 	if err != nil {
+		return File{}, nil, false
+	}
+	if sensitiveContent(data) {
 		return File{}, nil, false
 	}
 	hash := sha256.Sum256(data)
@@ -155,6 +170,17 @@ func collectFile(homeDir, source string) (File, []byte, bool) {
 	}, data, true
 }
 
+func immediateDotfile(path string) bool {
+	clean := filepath.Clean(path)
+	return filepath.Dir(clean) == "." && strings.HasPrefix(filepath.Base(clean), ".")
+}
+
+// VettedDotfile reports whether path is an explicitly supported root dotfile.
+func VettedDotfile(path string) bool {
+	clean := filepath.Clean(path)
+	return immediateDotfile(clean) && vettedDotfiles[filepath.Base(clean)]
+}
+
 func unsafePath(path string) bool {
 	clean := filepath.Clean(path)
 	return filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator))
@@ -162,14 +188,42 @@ func unsafePath(path string) bool {
 
 func sensitivePath(path string) bool {
 	lower := strings.ToLower(filepath.ToSlash(path))
+	if strings.HasPrefix(filepath.Base(lower), ".wave-") {
+		return true
+	}
 	if strings.HasPrefix(lower, ".ssh/") || strings.HasPrefix(lower, ".gnupg/") ||
 		strings.HasPrefix(lower, ".config/gcloud/") || strings.HasPrefix(lower, ".config/gh/") {
 		return true
 	}
 	base := strings.ToLower(filepath.Base(lower))
+	if base == ".netrc" || base == "_netrc" || base == ".authinfo" || base == ".authinfo.gpg" || base == ".pgpass" {
+		return true
+	}
 	for _, marker := range []string{"secret", "token", "credential", "private_key", "id_rsa", "id_ed25519"} {
 		if strings.Contains(base, marker) {
 			return true
+		}
+	}
+	return false
+}
+
+func sensitiveContent(data []byte) bool {
+	lower := strings.ToLower(string(data))
+	if credentialURL.MatchString(lower) || credentialTokenURL.MatchString(lower) || netrcCredential.MatchString(lower) || knownTokenValue.MatchString(lower) {
+		return true
+	}
+	if strings.Contains(lower, "-----begin ") && strings.Contains(lower, "private key-----") {
+		return true
+	}
+	for _, line := range strings.Split(lower, "\n") {
+		line = strings.TrimSpace(line)
+		if credentialAssignment.MatchString(line) {
+			return true
+		}
+		for _, marker := range []string{"api_key", "apikey", "api-token", "access_token", "auth_token", "authtoken", "client_secret", "password", "private_key", "github_token", "secret_access_key", "_authtoken"} {
+			if strings.Contains(line, marker) && (strings.Contains(line, "=") || strings.Contains(line, ":")) {
+				return true
+			}
 		}
 	}
 	return false
@@ -210,7 +264,9 @@ func Open(path string) (*Bundle, error) {
 		_ = reader.Close()
 		return nil, err
 	}
-	err = json.NewDecoder(io.LimitReader(manifestReader, 4<<20)).Decode(&bundle.Manifest)
+	decoder := json.NewDecoder(io.LimitReader(manifestReader, 4<<20))
+	decoder.DisallowUnknownFields()
+	err = decoder.Decode(&bundle.Manifest)
 	_ = manifestReader.Close()
 	if err != nil {
 		_ = reader.Close()
@@ -227,9 +283,13 @@ func Open(path string) (*Bundle, error) {
 	destinations := make(map[string]bool)
 	var totalSize int64
 	for _, file := range bundle.Manifest.Files {
-		if unsafePath(filepath.FromSlash(file.Destination)) || !strings.HasPrefix(file.Payload, "files/") || bundle.entries[file.Payload] == nil {
+		if unsafePath(filepath.FromSlash(file.Destination)) || !VettedDotfile(filepath.FromSlash(file.Destination)) || !strings.HasPrefix(file.Payload, "files/") || bundle.entries[file.Payload] == nil {
 			_ = reader.Close()
 			return nil, fmt.Errorf("invalid bundle file entry")
+		}
+		if file.Mode == 0 || file.Mode != file.Mode.Perm() || file.Mode.Perm() > 0777 {
+			_ = reader.Close()
+			return nil, fmt.Errorf("invalid file mode for %s", file.Destination)
 		}
 		if destinations[file.Destination] {
 			_ = reader.Close()
@@ -268,6 +328,9 @@ func (b *Bundle) ReadFile(file File) ([]byte, error) {
 	hash := sha256.Sum256(data)
 	if hex.EncodeToString(hash[:]) != file.SHA256 {
 		return nil, fmt.Errorf("checksum mismatch for %s", file.Destination)
+	}
+	if sensitivePath(filepath.FromSlash(file.Destination)) || sensitiveContent(data) {
+		return nil, fmt.Errorf("sensitive payload rejected for %s", file.Destination)
 	}
 	return data, nil
 }

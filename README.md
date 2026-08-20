@@ -4,9 +4,8 @@ Wave captures a structured inventory of a macOS machine and provides CLI, TUI,
 and local web interfaces for reviewing migration plans.
 
 > [!WARNING]
-> Cross-machine live restore is not ready. Current state files contain paths and
-> checksums for dotfiles, but not their contents. Use `--dry-run` to inspect a
-> plan. Do not use CLI live apply with valuable data.
+> Apply and rollback currently mutate vetted root dotfiles only. Applications,
+> preferences, `.config`, nested files, and credentials are preview-only.
 
 ## Current Capabilities
 
@@ -16,7 +15,8 @@ and local web interfaces for reviewing migration plans.
 | Preview a state file with CLI | Available with `--dry-run` |
 | Navigate capture and preview workflows in TUI | Available |
 | Capture and preview through a local web GUI | Available |
-| Restore dotfile contents on another Mac | Not available |
+| Restore vetted root dotfiles from a `.wave` archive | Available with confirmation |
+| Conflict-safe rollback | Available for applied root dotfiles |
 | Verification and state diff | Placeholders only |
 
 Wave currently inventories applications, selected dotfile paths, macOS
@@ -46,13 +46,13 @@ brew uninstall GOI17/wave/wave
 
 ### Release Binary
 
-Download version `1.0.3` or newer from the
+Download version `1.1.0` or newer from the
 [releases page](https://github.com/GOI17/wave/releases). Do not use the older
 `v1.0.0` binary for migration workflows.
 
 ```bash
 # Apple Silicon
-curl -LO https://github.com/GOI17/wave/releases/download/v1.0.3/wave-Darwin-arm64
+curl -LO https://github.com/GOI17/wave/releases/download/v1.1.0/wave-Darwin-arm64
 chmod +x wave-Darwin-arm64
 sudo mv wave-Darwin-arm64 /usr/local/bin/wave
 
@@ -78,17 +78,23 @@ make build
 Capture the current machine:
 
 ```bash
-wave capture --output wave-state.yaml
+wave capture --output wave-state.wave
 ```
 
-Review the generated file before using it elsewhere. State files can reveal
-local paths, usernames, application names, and environment configuration. Do
-not publish them without inspection.
+Keep `.wave` archives private. They contain vetted root dotfile contents plus
+application and preference metadata. Known credential paths/content, `.config`,
+nested files, and symlinks are excluded.
 
 Preview the migration plan without changing the machine:
 
 ```bash
-wave apply --input wave-state.yaml --dry-run
+wave apply --input wave-state.wave --dry-run
+
+# Apply only after reviewing the preview
+wave apply --input wave-state.wave --confirm
+
+# Restore the latest transaction; post-apply edits become conflicts
+wave rollback --confirm
 ```
 
 ## TUI
@@ -101,12 +107,12 @@ Use arrow keys or `j`/`k` to navigate, Enter to select, and `q` to quit.
 The migration option is explicitly preview-only and runs CLI apply with
 `--dry-run`.
 
-The default state path is `~/wave-state.yaml`:
+The default state path is `~/wave-state.wave`:
 
 - **Capture Device State** writes that file.
 - **Preview Migration (Dry Run)** validates and previews it.
-- **View Captured State** opens it with `less`.
-- **Verify Migration** is currently a placeholder.
+- **Apply Migration** requires `y` confirmation.
+- **Rollback Latest Migration** requires `y` confirmation.
 
 ## GUI
 
@@ -120,13 +126,16 @@ Wave binds only to `127.0.0.1`, opens the default browser, and prints the local
 URL. Press Ctrl+C in the terminal to stop the server. If the browser does not
 open, visit the printed URL manually.
 
-The GUI supports capture and dry-run preview only. Live apply is rejected.
+The GUI supports capture, preview, confirmed Apply, and confirmed Rollback.
+Type `APPLY` or `ROLLBACK` before mutation.
 
 ## Commands
 
 ```text
-wave capture [--output FILE] [--format yaml|json]
-wave apply --input FILE --dry-run [--format yaml|json]
+wave capture [--output setup.wave]
+wave apply --input setup.wave --dry-run
+wave apply --input setup.wave --confirm
+wave rollback [--transaction ID] --confirm
 wave tui
 wave gui [--port 8080]
 wave verify --input FILE  # placeholder
@@ -137,13 +146,14 @@ wave --help
 
 ## Safety Limits
 
-- A capture does not bundle dotfile contents, so it cannot reproduce those
-  files on another machine.
-- State paths are absolute and may not exist on the target machine.
-- Captures may include metadata for sensitive paths. Private SSH keys should
-  never be transferred through Wave.
-- TUI and GUI migration workflows are dry-run-only.
-- CLI live apply exists for development but is not recommended for user data.
+- Only immediate root dotfiles that pass strict safety checks are bundled and
+  applied. `.config`, nested files, symlinks, applications, preferences, and
+  credentials are never mutated.
+- Rollback restores exact original file identity. If a file changed after
+  Apply, Wave preserves it and reports a conflict instead of overwriting it.
+- Transaction data is retained under `~/.wave/transactions` for recovery.
+- Malformed transaction metadata blocks Apply until explicitly quarantined with
+  `wave transactions quarantine --transaction ID --confirm`.
 - Keep an independent, tested backup before experimenting with migration tools.
 
 ## Development

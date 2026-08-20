@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGUICommandStartsServer(t *testing.T) {
 	originalStartGUI := startGUI
@@ -25,5 +28,16 @@ func TestGUICommandStartsServer(t *testing.T) {
 	}
 	if startedPort != "4321" {
 		t.Fatalf("started port = %q, want 4321", startedPort)
+	}
+}
+
+func TestRollbackRequiresConfirmation(t *testing.T) {
+	original := rollbackConfirm
+	rollbackConfirm = false
+	defer func() { rollbackConfirm = original }()
+
+	err := rollbackCmd.RunE(rollbackCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "requires --confirm") {
+		t.Fatalf("error = %v, want confirmation error", err)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"wave/internal/analyzer"
 	"wave/internal/executor"
 	"wave/internal/migrator"
+	"wave/internal/transaction"
 )
 
 // Server represents the GUI web server
@@ -75,6 +76,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/", s.indexHandler)
 	s.mux.Handle("/api/capture", s.localOnly(s.exclusive(http.HandlerFunc(s.captureHandler))))
 	s.mux.Handle("/api/apply", s.localOnly(s.exclusive(http.HandlerFunc(s.applyHandler))))
+	s.mux.Handle("/api/rollback", s.localOnly(s.exclusive(http.HandlerFunc(s.rollbackHandler))))
 	s.mux.Handle("/api/status", s.localOnly(http.HandlerFunc(s.statusHandler)))
 	s.mux.Handle("/api/state", s.localOnly(http.HandlerFunc(s.stateHandler)))
 }
@@ -87,7 +89,7 @@ func (s *Server) localOnly(next http.Handler) http.Handler {
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			parsed, err := url.Parse(origin)
-			if err != nil || !isLoopbackHost(parsed.Host) {
+			if err != nil || !strings.EqualFold(parsed.Host, r.Host) {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
@@ -137,13 +139,13 @@ func (s *Server) captureHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	homeDir, _ := os.UserHomeDir()
-	outputPath := filepath.Join(homeDir, "wave-state.yaml")
+	outputPath := filepath.Join(homeDir, "wave-state.wave")
 
 	analyzer := analyzer.NewMacOSAnalyzer(homeDir)
 	executor := executor.NewMacOSExecutor(homeDir, false)
 	mig := migrator.NewMigrator(analyzer, executor)
 
-	if err := mig.Capture(outputPath, "yaml"); err != nil {
+	if err := mig.CaptureBundle(outputPath, homeDir); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
@@ -159,18 +161,18 @@ func (s *Server) applyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
-	if r.FormValue("dry-run") != "true" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "GUI migrations require dry-run mode"})
+	dryRun := r.FormValue("dry-run") == "true"
+	if !dryRun && r.FormValue("confirmation") != "APPLY" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "type APPLY to confirm live migration"})
 		return
 	}
-	dryRun := true
 
 	inputPath := ""
-	format := "yaml"
+	format := "wave"
 	cleanup := func() {}
 	if r.FormValue("use-default") == "true" {
 		homeDir, _ := os.UserHomeDir()
-		inputPath = filepath.Join(homeDir, "wave-state.yaml")
+		inputPath = filepath.Join(homeDir, "wave-state.wave")
 		if _, err := os.Stat(inputPath); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "default captured state is not available"})
 			return
@@ -185,27 +187,55 @@ func (s *Server) applyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	homeDir, _ := os.UserHomeDir()
-	analyzer := analyzer.NewMacOSAnalyzer(homeDir)
-	executor := executor.NewMacOSExecutor(homeDir, dryRun)
-	mig := migrator.NewMigrator(analyzer, executor)
-
-	result, err := mig.Apply(inputPath, dryRun, format)
-	if err != nil {
-		response := map[string]any{"success": false, "error": err.Error()}
-		if result != nil {
-			response["result"] = result
-			response["summary"] = migrator.FormatSummary(result)
-		}
-		writeJSON(w, http.StatusBadRequest, response)
+	if format != "wave" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "apply and preview require a portable .wave archive"})
 		return
 	}
+	if dryRun {
+		result, err := transaction.Preview(inputPath)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "result": result, "summary": migrator.FormatSummary(result)})
+		return
+	}
+	homeDir, _ := os.UserHomeDir()
+	journal, err := transaction.Apply(inputPath, homeDir, filepath.Join(homeDir, ".wave", "transactions"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "transaction": journal, "summary": transaction.FormatApplySummary(journal)})
+}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success": true,
-		"result":  result,
-		"summary": migrator.FormatSummary(result),
-	})
+func (s *Server) rollbackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.FormValue("confirmation") != "ROLLBACK" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "type ROLLBACK to confirm"})
+		return
+	}
+	homeDir, _ := os.UserHomeDir()
+	transactionsDir := filepath.Join(homeDir, ".wave", "transactions")
+	id := r.FormValue("transaction")
+	if id == "" {
+		result, err := transaction.RollbackLatest(homeDir, transactionsDir)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "rollback": result, "summary": transaction.FormatRollbackSummary(result)})
+		return
+	}
+	result, err := transaction.Rollback(id, homeDir, transactionsDir)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "rollback": result, "summary": transaction.FormatRollbackSummary(result)})
 }
 
 func saveUploadedState(r *http.Request) (string, string, func(), error) {
@@ -224,9 +254,9 @@ func saveUploadedState(r *http.Request) (string, string, func(), error) {
 	if format == "yml" {
 		format = "yaml"
 	}
-	if format != "yaml" && format != "json" {
+	if format != "wave" {
 		removeMultipartFiles()
-		return "", "", func() {}, fmt.Errorf("state file must be YAML or JSON")
+		return "", "", func() {}, fmt.Errorf("state file must be a .wave archive")
 	}
 
 	tempFile, err := os.CreateTemp("", "wave-state-*")
@@ -260,7 +290,7 @@ func (s *Server) statusHandler(w http.ResponseWriter, r *http.Request) {
 // stateHandler reports whether the default captured state is available.
 func (s *Server) stateHandler(w http.ResponseWriter, r *http.Request) {
 	homeDir, _ := os.UserHomeDir()
-	stateFile := filepath.Join(homeDir, "wave-state.yaml")
+	stateFile := filepath.Join(homeDir, "wave-state.wave")
 	info, err := os.Stat(stateFile)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"exists": false, "path": stateFile})
@@ -540,17 +570,27 @@ func getIndexHTML(version string) string {
             <!-- Apply Tab -->
             <div id="apply" class="tab-content">
                 <div class="section">
-					<h2><span>⚡</span>Preview Migration</h2>
+					<h2><span>⚡</span>Preview, Apply & Rollback</h2>
 					<div id="default-state" class="status info" hidden></div>
                     <div class="file-input-wrapper">
-                        <label for="state-file">Choose state file:</label>
-                        <input type="file" id="state-file" accept=".yaml,.yml,.json">
+                        <label for="state-file">Choose portable archive:</label>
+						<input type="file" id="state-file" accept=".wave">
                     </div>
                     <div class="checkbox">
                         <input type="checkbox" id="dry-run" checked disabled>
                         <label for="dry-run">Dry-run required (preview only)</label>
                     </div>
                     <button class="button" onclick="applyState()">Preview Migration</button>
+					<div class="file-input-wrapper">
+						<label for="apply-confirmation">Type APPLY to confirm changes:</label>
+						<input type="text" id="apply-confirmation" autocomplete="off">
+					</div>
+					<button class="button" onclick="applyLiveState()">Apply Migration</button>
+					<div class="file-input-wrapper">
+						<label for="rollback-confirmation">Type ROLLBACK to restore the latest transaction:</label>
+						<input type="text" id="rollback-confirmation" autocomplete="off">
+					</div>
+					<button class="button secondary" onclick="rollbackState()">Rollback Latest Migration</button>
                     <div id="apply-status"></div>
                 </div>
             </div>
@@ -632,9 +672,8 @@ func getIndexHTML(version string) string {
                 .catch(err => showStatus('capture-status', '❌ Error: ' + err.message, 'error'));
         }
 
-        function applyState() {
+		function migrationFormData(dryRun) {
             const fileInput = document.getElementById('state-file');
-            const dryRun = document.getElementById('dry-run').checked;
 			const formData = new FormData();
 
             if (!fileInput.value) {
@@ -642,7 +681,7 @@ func getIndexHTML(version string) string {
 					formData.append('use-default', 'true');
 				} else {
 					showStatus('apply-status', '❌ Please select a state file', 'error');
-					return;
+					return null;
 				}
 			} else {
 				formData.append('file', fileInput.files[0]);
@@ -651,6 +690,14 @@ func getIndexHTML(version string) string {
             showStatus('apply-status', 'Applying migration preview...', 'info');
 
             formData.append('dry-run', dryRun);
+			return formData;
+		}
+
+        function applyState() {
+			const formData = migrationFormData(true);
+			if (!formData) return;
+
+			showStatus('apply-status', 'Applying migration preview...', 'info');
 
             fetch('/api/apply', { method: 'POST', body: formData })
                 .then(r => r.json())
@@ -667,6 +714,38 @@ func getIndexHTML(version string) string {
                 })
                 .catch(err => showStatus('apply-status', '❌ Error: ' + err.message, 'error'));
         }
+
+		function applyLiveState() {
+			const confirmation = document.getElementById('apply-confirmation').value;
+			const formData = migrationFormData(false);
+			if (!formData) return;
+			formData.append('confirmation', confirmation);
+			showStatus('apply-status', 'Applying migration...', 'info');
+			fetch('/api/apply', { method: 'POST', body: formData })
+				.then(r => r.json())
+				.then(data => {
+					if (data.success) {
+						showPreviewSummary('apply-status', data.summary);
+					} else {
+						showStatus('apply-status', '❌ Error: ' + data.error, 'error');
+					}
+				});
+		}
+
+		function rollbackState() {
+			const formData = new FormData();
+			formData.append('confirmation', document.getElementById('rollback-confirmation').value);
+			showStatus('apply-status', 'Rolling back latest migration...', 'info');
+			fetch('/api/rollback', { method: 'POST', body: formData })
+				.then(r => r.json())
+				.then(data => {
+					if (data.success) {
+						showPreviewSummary('apply-status', data.summary);
+					} else {
+						showStatus('apply-status', '❌ Error: ' + data.error, 'error');
+					}
+				});
+		}
 
 		function loadDefaultState() {
 			fetch('/api/state')

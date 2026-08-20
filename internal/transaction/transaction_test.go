@@ -1,7 +1,6 @@
 package transaction_test
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,7 @@ func TestApplyAndRollbackFiles(t *testing.T) {
 	sourceHome := t.TempDir()
 	targetHome := t.TempDir()
 	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
-	relative := filepath.Join(".config", "tool", "config.toml")
+	relative := ".vimrc"
 	sourcePath := filepath.Join(sourceHome, relative)
 	targetPath := filepath.Join(targetHome, relative)
 	if err := os.MkdirAll(filepath.Dir(sourcePath), 0700); err != nil {
@@ -39,8 +38,7 @@ func TestApplyAndRollbackFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	system := newFakeSystem()
-	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
@@ -49,7 +47,7 @@ func TestApplyAndRollbackFiles(t *testing.T) {
 	}
 	assertFile(t, targetPath, "new\n", 0640)
 
-	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
+	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatalf("Rollback() error = %v", err)
 	}
@@ -57,6 +55,42 @@ func TestApplyAndRollbackFiles(t *testing.T) {
 		t.Fatalf("rollback result = %#v", result)
 	}
 	assertFile(t, targetPath, "old\n", 0600)
+}
+
+func TestRollbackRestoresOriginalInodeAndHardLinks(t *testing.T) {
+	sourceHome := t.TempDir()
+	targetHome := t.TempDir()
+	sourcePath := filepath.Join(sourceHome, ".vimrc")
+	targetPath := filepath.Join(targetHome, ".vimrc")
+	hardLink := filepath.Join(targetHome, ".vimrc-link")
+	if err := os.WriteFile(sourcePath, []byte("captured"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(targetPath, hardLink); err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, _ := os.Stat(targetPath)
+	bundlePath := filepath.Join(t.TempDir(), "device.wave")
+	state := &models.MigrationState{Version: "1.0.0", Dotfiles: models.DotfilesGroup{Files: []models.DotfileEntry{{Source: sourcePath}}}}
+	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
+		t.Fatal(err)
+	}
+	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transaction.Rollback(journal.ID, targetHome, transactionsDir); err != nil {
+		t.Fatal(err)
+	}
+	restoredInfo, _ := os.Stat(targetPath)
+	linkInfo, _ := os.Stat(hardLink)
+	if !os.SameFile(originalInfo, restoredInfo) || !os.SameFile(restoredInfo, linkInfo) {
+		t.Fatal("rollback did not restore original inode and hard-link identity")
+	}
 }
 
 func TestRollbackRefusesPostApplyChanges(t *testing.T) {
@@ -79,8 +113,7 @@ func TestRollbackRefusesPostApplyChanges(t *testing.T) {
 	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
 		t.Fatal(err)
 	}
-	system := newFakeSystem()
-	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +121,7 @@ func TestRollbackRefusesPostApplyChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
+	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatalf("Rollback() error = %v", err)
 	}
@@ -98,11 +131,42 @@ func TestRollbackRefusesPostApplyChanges(t *testing.T) {
 	assertFile(t, targetPath, "captured\nuser edit\n", 0600)
 }
 
+func TestRollbackRefusesInPlaceChangesToNewFile(t *testing.T) {
+	sourceHome := t.TempDir()
+	targetHome := t.TempDir()
+	sourcePath := filepath.Join(sourceHome, ".editorconfig")
+	targetPath := filepath.Join(targetHome, ".editorconfig")
+	if err := os.WriteFile(sourcePath, []byte("captured"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "device.wave")
+	state := &models.MigrationState{Version: "1.0.0", Dotfiles: models.DotfilesGroup{Files: []models.DotfileEntry{{Source: sourcePath}}}}
+	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
+		t.Fatal(err)
+	}
+	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, []byte("user edit"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Conflicts != 1 || result.Removed != 0 {
+		t.Fatalf("rollback result = %#v, want conflict", result)
+	}
+	assertFile(t, targetPath, "user edit", 0600)
+}
+
 func TestRollbackRemovesFileCreatedByApply(t *testing.T) {
 	sourceHome := t.TempDir()
 	targetHome := t.TempDir()
 	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
-	sourcePath := filepath.Join(sourceHome, ".new-config")
+	sourcePath := filepath.Join(sourceHome, ".prettierrc")
 	if err := os.WriteFile(sourcePath, []byte("new\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -113,52 +177,27 @@ func TestRollbackRemovesFileCreatedByApply(t *testing.T) {
 	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
 		t.Fatal(err)
 	}
-	system := newFakeSystem()
-	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
+	appliedInfo, err := os.Stat(filepath.Join(targetHome, ".prettierrc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Removed != 1 {
 		t.Fatalf("rollback result = %#v", result)
 	}
-	if _, err := os.Stat(filepath.Join(targetHome, ".new-config")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(targetHome, ".prettierrc")); !os.IsNotExist(err) {
 		t.Fatalf("created file still exists: %v", err)
 	}
-}
-
-func TestApplyRejectsSymlinkedParentOutsideHome(t *testing.T) {
-	sourceHome := t.TempDir()
-	targetHome := t.TempDir()
-	outsideDir := t.TempDir()
-	sourcePath := filepath.Join(sourceHome, ".config", "tool", "config")
-	if err := os.MkdirAll(filepath.Dir(sourcePath), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(sourcePath, []byte("captured"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(targetHome, ".config"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outsideDir, filepath.Join(targetHome, ".config", "tool")); err != nil {
-		t.Fatal(err)
-	}
-	bundlePath := filepath.Join(t.TempDir(), "device.wave")
-	state := &models.MigrationState{Version: "1.0.0", Dotfiles: models.DotfilesGroup{Files: []models.DotfileEntry{{Source: sourcePath}}}}
-	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := transaction.ApplyWithSystem(bundlePath, targetHome, filepath.Join(targetHome, ".wave", "transactions"), newFakeSystem())
-	if err == nil {
-		t.Fatal("Apply() accepted a destination through an external symlink")
-	}
-	if _, err := os.Stat(filepath.Join(outsideDir, "config")); !os.IsNotExist(err) {
-		t.Fatalf("outside file exists: %v", err)
+	preservedInfo, err := os.Stat(filepath.Join(transactionsDir, journal.ID, journal.Files[0].Staged))
+	if err != nil || !os.SameFile(appliedInfo, preservedInfo) {
+		t.Fatalf("applied inode was not retained: %v", err)
 	}
 }
 
@@ -179,8 +218,7 @@ func TestRollbackRefusesPostApplyModeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
-	system := newFakeSystem()
-	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +226,7 @@ func TestRollbackRefusesPostApplyModeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
+	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +236,38 @@ func TestRollbackRefusesPostApplyModeChange(t *testing.T) {
 	assertFile(t, targetPath, "captured", 0644)
 }
 
-func TestApplyAndRollbackPreferencesAndNewPackages(t *testing.T) {
+func TestApplyRejectsDestinationSymlink(t *testing.T) {
+	sourceHome := t.TempDir()
+	targetHome := t.TempDir()
+	sourcePath := filepath.Join(sourceHome, ".zshrc")
+	targetPath := filepath.Join(targetHome, ".zshrc")
+	realTarget := filepath.Join(targetHome, "real-zshrc")
+	if err := os.WriteFile(sourcePath, []byte("captured"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realTarget, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realTarget, targetPath); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "device.wave")
+	state := &models.MigrationState{Version: "1.0.0", Dotfiles: models.DotfilesGroup{Files: []models.DotfileEntry{{Source: sourcePath}}}}
+	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
+		t.Fatal(err)
+	}
+	_, err := transaction.Apply(bundlePath, targetHome, filepath.Join(targetHome, ".wave", "transactions"))
+	if err == nil || !strings.Contains(err.Error(), "symlinks are not supported") {
+		t.Fatalf("error = %v, want destination symlink rejection", err)
+	}
+	info, err := os.Lstat(targetPath)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("destination symlink was replaced: %v, %#v", err, info)
+	}
+	assertFile(t, realTarget, "original", 0600)
+}
+
+func TestApplyLeavesPreferencesAndPackagesPreviewOnly(t *testing.T) {
 	sourceHome := t.TempDir()
 	targetHome := t.TempDir()
 	bundlePath := filepath.Join(t.TempDir(), "device.wave")
@@ -216,137 +285,20 @@ func TestApplyAndRollbackPreferencesAndNewPackages(t *testing.T) {
 	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
 		t.Fatal(err)
 	}
-	system := newFakeSystem()
-	system.preferences["com.apple.finder:AppleShowAllFiles"] = fakePreference{kind: "bool", value: "false"}
 	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
 
-	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
+	journal, err := transaction.Apply(bundlePath, targetHome, transactionsDir)
 	if err != nil {
-		t.Fatalf("ApplyWithSystem() error = %v", err)
-	}
-	if system.preferences["com.apple.finder:AppleShowAllFiles"].value != "true" || system.packages["homebrew:jq"] == "" || !system.extensions["publisher.extension"] {
-		t.Fatalf("system was not applied: %#v %#v %#v", system.preferences, system.packages, system.extensions)
+		t.Fatalf("Apply() error = %v", err)
 	}
 
-	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
+	result, err := transaction.Rollback(journal.ID, targetHome, transactionsDir)
 	if err != nil {
-		t.Fatalf("RollbackWithSystem() error = %v", err)
+		t.Fatalf("Rollback() error = %v", err)
 	}
-	if result.PreferencesRestored == 0 || result.PackagesRemoved != 2 {
+	if result.Restored != 0 || result.Removed != 0 || result.Conflicts != 0 {
 		t.Fatalf("rollback result = %#v", result)
 	}
-	if system.preferences["com.apple.finder:AppleShowAllFiles"].value != "false" || system.packages["homebrew:jq"] != "" || system.extensions["publisher.extension"] {
-		t.Fatalf("system was not rolled back: %#v %#v %#v", system.preferences, system.packages, system.extensions)
-	}
-}
-
-func TestRollbackRefusesChangedPreferenceAndPackage(t *testing.T) {
-	sourceHome := t.TempDir()
-	targetHome := t.TempDir()
-	bundlePath := filepath.Join(t.TempDir(), "device.wave")
-	state := &models.MigrationState{
-		Version:      "1.0.0",
-		Applications: models.ApplicationGroup{Homebrew: []models.HomebrewPackage{{Name: "jq", Type: "formula"}}},
-		Preferences:  models.PreferencesGroup{Finder: models.FinderPrefs{ShowHiddenFiles: true}},
-	}
-	if err := bundle.Create(bundlePath, sourceHome, state); err != nil {
-		t.Fatal(err)
-	}
-	system := newFakeSystem()
-	transactionsDir := filepath.Join(targetHome, ".wave", "transactions")
-	journal, err := transaction.ApplyWithSystem(bundlePath, targetHome, transactionsDir, system)
-	if err != nil {
-		t.Fatal(err)
-	}
-	system.preferences["com.apple.finder:AppleShowAllFiles"] = fakePreference{kind: "bool", value: "false"}
-	system.packages["homebrew:jq"] = "jq 2.0"
-
-	result, err := transaction.RollbackWithSystem(journal.ID, targetHome, transactionsDir, system)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Conflicts < 2 {
-		t.Fatalf("rollback result = %#v, want preference and package conflicts", result)
-	}
-}
-
-type fakePreference struct {
-	kind  string
-	value string
-}
-
-type fakeSystem struct {
-	preferences map[string]fakePreference
-	packages    map[string]string
-	extensions  map[string]bool
-}
-
-func newFakeSystem() *fakeSystem {
-	return &fakeSystem{
-		preferences: make(map[string]fakePreference),
-		packages:    make(map[string]string),
-		extensions:  make(map[string]bool),
-	}
-}
-
-func (s *fakeSystem) Output(name string, args ...string) (string, error) {
-	if name == "defaults" {
-		key := args[1] + ":" + args[2]
-		value, ok := s.preferences[key]
-		if !ok {
-			return "", fmt.Errorf("not found")
-		}
-		if args[0] == "read-type" {
-			return map[string]string{"bool": "Type is boolean", "int": "Type is integer", "string": "Type is string"}[value.kind], nil
-		}
-		return value.value, nil
-	}
-	if name == "brew" {
-		packageName := args[len(args)-1]
-		version := s.packages["homebrew:"+packageName]
-		if version == "" {
-			return "", fmt.Errorf("not installed")
-		}
-		return version, nil
-	}
-	if name == "code" {
-		var installed []string
-		for extension, exists := range s.extensions {
-			if exists {
-				installed = append(installed, extension)
-			}
-		}
-		return strings.Join(installed, "\n"), nil
-	}
-	return "", fmt.Errorf("unsupported command")
-}
-
-func (s *fakeSystem) Run(name string, args ...string) error {
-	if name == "defaults" {
-		key := args[1] + ":" + args[2]
-		if args[0] == "delete" {
-			delete(s.preferences, key)
-			return nil
-		}
-		s.preferences[key] = fakePreference{kind: strings.TrimPrefix(args[3], "-"), value: args[4]}
-		return nil
-	}
-	if name == "brew" {
-		packageName := args[len(args)-1]
-		key := "homebrew:" + packageName
-		if args[0] == "install" {
-			s.packages[key] = packageName + " 1.0"
-		} else {
-			delete(s.packages, key)
-		}
-		return nil
-	}
-	if name == "code" {
-		extension := args[len(args)-1]
-		s.extensions[extension] = args[0] == "--install-extension"
-		return nil
-	}
-	return fmt.Errorf("unsupported command")
 }
 
 func assertFile(t *testing.T, path, content string, mode os.FileMode) {

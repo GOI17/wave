@@ -16,15 +16,17 @@ import (
 )
 
 var (
-	outputPath    string
-	inputPath     string
-	format        string
-	dryRun        bool
-	confirm       bool
-	transactionID string
-	startGUI      = gui.StartGUI
+	outputPath        string
+	inputPath         string
+	format            string
+	dryRun            bool
+	confirm           bool
+	rollbackConfirm   bool
+	quarantineConfirm bool
+	transactionID     string
+	startGUI          = gui.StartGUI
 	// Version is overridden with release build flags.
-	Version = "1.0.3"
+	Version = "1.1.0"
 )
 
 // RootCmd is the root command
@@ -135,8 +137,7 @@ var applyCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("apply failed: %w", err)
 		}
-		fmt.Printf("Migration applied. Transaction: %s\n", journal.ID)
-		fmt.Printf("Rollback with: wave rollback --transaction %s\n", journal.ID)
+		fmt.Print(transaction.FormatApplySummary(journal))
 		return nil
 	},
 }
@@ -159,6 +160,9 @@ var rollbackCmd = &cobra.Command{
 	Use:   "rollback",
 	Short: "Rollback an applied migration transaction",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !rollbackConfirm {
+			return fmt.Errorf("rollback requires --confirm; changed items will be preserved as conflicts")
+		}
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			return err
@@ -166,24 +170,40 @@ var rollbackCmd = &cobra.Command{
 		transactionsDir := filepath.Join(homeDir, ".wave", "transactions")
 		id := transactionID
 		if id == "" {
-			latest, err := transaction.Latest(transactionsDir)
+			result, err := transaction.RollbackLatest(homeDir, transactionsDir)
 			if err != nil {
-				return err
+				return fmt.Errorf("rollback failed: %w", err)
 			}
-			id = latest.ID
+			fmt.Print(transaction.FormatRollbackSummary(result))
+			return nil
 		}
 		result, err := transaction.Rollback(id, homeDir, transactionsDir)
 		if err != nil {
 			return fmt.Errorf("rollback failed: %w", err)
 		}
-		fmt.Printf("Rollback %s: %d files restored, %d files removed, %d preferences restored, %d packages removed, %d conflicts\n",
-			result.TransactionID, result.Restored, result.Removed, result.PreferencesRestored, result.PackagesRemoved, result.Conflicts)
-		if result.Conflicts > 0 {
-			fmt.Println("Conflicts were preserved and require manual resolution:")
-			for _, path := range result.ConflictPaths {
-				fmt.Println("- " + path)
-			}
+		fmt.Print(transaction.FormatRollbackSummary(result))
+		return nil
+	},
+}
+
+var transactionsCmd = &cobra.Command{Use: "transactions", Short: "Manage migration transaction metadata"}
+
+var quarantineCmd = &cobra.Command{
+	Use:   "quarantine",
+	Short: "Move a malformed transaction aside for manual inspection",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !quarantineConfirm || transactionID == "" {
+			return fmt.Errorf("quarantine requires --transaction ID and --confirm")
 		}
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		destination, err := transaction.Quarantine(transactionID, filepath.Join(homeDir, ".wave", "transactions"))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Transaction quarantined for manual inspection: %s\n", destination)
 		return nil
 	},
 }
@@ -258,6 +278,10 @@ func init() {
 	applyCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without applying them")
 	applyCmd.Flags().BoolVar(&confirm, "confirm", false, "Confirm live apply of a portable .wave archive")
 	rollbackCmd.Flags().StringVar(&transactionID, "transaction", "", "Transaction ID (default: latest eligible transaction)")
+	rollbackCmd.Flags().BoolVar(&rollbackConfirm, "confirm", false, "Confirm rollback of the selected transaction")
+	quarantineCmd.Flags().StringVar(&transactionID, "transaction", "", "Malformed transaction ID")
+	quarantineCmd.Flags().BoolVar(&quarantineConfirm, "confirm", false, "Confirm quarantine without deleting transaction data")
+	transactionsCmd.AddCommand(quarantineCmd)
 
 	// Verify command flags
 	verifyCmd.Flags().StringVarP(&inputPath, "input", "i", "", "Input state file path")
@@ -269,6 +293,7 @@ func init() {
 	RootCmd.AddCommand(captureCmd)
 	RootCmd.AddCommand(applyCmd)
 	RootCmd.AddCommand(rollbackCmd)
+	RootCmd.AddCommand(transactionsCmd)
 	RootCmd.AddCommand(verifyCmd)
 	RootCmd.AddCommand(diffCmd)
 	RootCmd.AddCommand(tuiCmd)
