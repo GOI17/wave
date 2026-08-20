@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"wave/internal/bundle"
@@ -62,6 +63,10 @@ func TestCreateAndOpenPortableBundle(t *testing.T) {
 	}
 	if string(data) != "theme = 'darcula'\n" {
 		t.Fatalf("data = %q", data)
+	}
+	summary := bundle.FormatSummary(opened)
+	if !strings.Contains(summary, "Portable Archive Contents") || !strings.Contains(summary, "- .vimrc (18 bytes, mode 0640)") {
+		t.Fatalf("summary = %q", summary)
 	}
 }
 

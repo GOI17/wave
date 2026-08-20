@@ -26,7 +26,7 @@ var (
 	transactionID     string
 	startGUI          = gui.StartGUI
 	// Version is overridden with release build flags.
-	Version = "1.1.1"
+	Version = "1.1.2"
 )
 
 // RootCmd is the root command

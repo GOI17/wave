@@ -190,8 +190,18 @@ func RollbackLatest(homeDir, transactionsDir string) (*RollbackResult, error) {
 
 // FormatApplySummary renders the canonical apply completion summary.
 func FormatApplySummary(journal *Journal) string {
-	return fmt.Sprintf("Migration Apply Summary\n=======================\nTransaction: %s\nRoot dotfiles applied: %d\nApplications: preview-only\nPreferences: preview-only\n\nRollback with: wave rollback --transaction %s --confirm\n",
-		journal.ID, len(journal.Files), journal.ID)
+	var summary strings.Builder
+	summary.WriteString("Migration Apply Summary\n")
+	summary.WriteString("=======================\n")
+	fmt.Fprintf(&summary, "Transaction: %s\n", journal.ID)
+	fmt.Fprintf(&summary, "Root dotfiles applied: %d\n", len(journal.Files))
+	for _, file := range journal.Files {
+		fmt.Fprintf(&summary, "- %s\n", file.Destination)
+	}
+	summary.WriteString("Applications: preview-only\n")
+	summary.WriteString("Preferences: preview-only\n")
+	fmt.Fprintf(&summary, "\nRollback with: wave rollback --transaction %s --confirm\n", journal.ID)
+	return summary.String()
 }
 
 // FormatRollbackSummary renders the canonical rollback completion summary.

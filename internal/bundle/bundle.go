@@ -335,6 +335,36 @@ func (b *Bundle) ReadFile(file File) ([]byte, error) {
 	return data, nil
 }
 
+// FormatSummary renders a human-readable inventory of a validated archive.
+func FormatSummary(b *Bundle) string {
+	var summary strings.Builder
+	summary.WriteString("Portable Archive Contents\n")
+	summary.WriteString("=========================\n")
+	if len(b.Manifest.Files) == 0 {
+		summary.WriteString("Root dotfiles: none\n")
+	} else {
+		summary.WriteString("Root dotfiles:\n")
+		for _, file := range b.Manifest.Files {
+			fmt.Fprintf(&summary, "- %s (%d bytes, mode %04o)\n", file.Destination, file.Size, file.Mode.Perm())
+		}
+	}
+	homebrew := b.Manifest.State.Applications.Homebrew
+	extensions := b.Manifest.State.Applications.VSCodeExtensions
+	if len(homebrew)+len(extensions) > 0 {
+		summary.WriteString("\nApplications (preview-only):\n")
+		for _, application := range homebrew {
+			fmt.Fprintf(&summary, "- Homebrew: %s (%s)\n", application.Name, application.Type)
+		}
+		for _, extension := range extensions {
+			fmt.Fprintf(&summary, "- VS Code: %s\n", extension)
+		}
+	}
+	if b.Manifest.Excluded > 0 {
+		fmt.Fprintf(&summary, "\nExcluded during capture: %d\n", b.Manifest.Excluded)
+	}
+	return summary.String()
+}
+
 // Close closes the archive.
 func (b *Bundle) Close() error {
 	return b.reader.Close()

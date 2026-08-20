@@ -5,7 +5,7 @@
 
 set -e
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 PROJECT="Wave"
 BINARY="wave"
 BUILD_DIR="./build"
