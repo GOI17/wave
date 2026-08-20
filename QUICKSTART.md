@@ -16,6 +16,13 @@ wave version
 The qualified formula name distinguishes this project from the unrelated Wave
 Terminal package. After installation, use the normal `wave` command.
 
+Update or remove the Homebrew installation with:
+
+```bash
+wave update
+wave uninstall --confirm
+```
+
 To build from source instead:
 
 ```bash

@@ -136,6 +136,8 @@ wave capture [--output setup.wave]
 wave apply --input setup.wave --dry-run
 wave apply --input setup.wave --confirm
 wave rollback [--transaction ID] --confirm
+wave update
+wave uninstall --confirm
 wave tui
 wave gui [--port 8080]
 wave verify --input FILE  # placeholder

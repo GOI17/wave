@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -23,10 +24,12 @@ var (
 	confirm           bool
 	rollbackConfirm   bool
 	quarantineConfirm bool
+	uninstallConfirm  bool
 	transactionID     string
 	startGUI          = gui.StartGUI
+	runBrew           = runHomebrew
 	// Version is overridden with release build flags.
-	Version = "1.1.2"
+	Version = "1.1.3"
 )
 
 // RootCmd is the root command
@@ -266,6 +269,45 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update Wave through Homebrew",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		fmt.Println("Updating Wave through Homebrew...")
+		if err := runBrew("upgrade", "GOI17/wave/wave"); err != nil {
+			return fmt.Errorf("update failed: %w", err)
+		}
+		return nil
+	},
+}
+
+var uninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Uninstall Wave through Homebrew",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !uninstallConfirm {
+			return fmt.Errorf("uninstall requires --confirm")
+		}
+		fmt.Println("Uninstalling Wave through Homebrew...")
+		if err := runBrew("uninstall", "GOI17/wave/wave"); err != nil {
+			return fmt.Errorf("uninstall failed: %w", err)
+		}
+		return nil
+	},
+}
+
+func runHomebrew(args ...string) error {
+	brew, err := exec.LookPath("brew")
+	if err != nil {
+		return fmt.Errorf("Homebrew is required; install it from https://brew.sh")
+	}
+	command := exec.Command(brew, args...)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	return command.Run()
+}
+
 func init() {
 	// Global flags
 	RootCmd.PersistentFlags().StringVar(&format, "format", "yaml", "Output format: yaml or json")
@@ -288,6 +330,7 @@ func init() {
 
 	// GUI command flags
 	guiCmd.Flags().String("port", "8080", "Port to run GUI server on")
+	uninstallCmd.Flags().BoolVar(&uninstallConfirm, "confirm", false, "Confirm removal of the Wave Homebrew formula")
 
 	// Add commands to root
 	RootCmd.AddCommand(captureCmd)
@@ -299,4 +342,6 @@ func init() {
 	RootCmd.AddCommand(tuiCmd)
 	RootCmd.AddCommand(guiCmd)
 	RootCmd.AddCommand(versionCmd)
+	RootCmd.AddCommand(updateCmd)
+	RootCmd.AddCommand(uninstallCmd)
 }

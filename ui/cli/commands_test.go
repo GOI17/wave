@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,54 @@ func TestGUICommandStartsServer(t *testing.T) {
 	}
 	if startedPort != "4321" {
 		t.Fatalf("started port = %q, want 4321", startedPort)
+	}
+}
+
+func TestUpdateUsesHomebrewFormula(t *testing.T) {
+	original := runBrew
+	defer func() { runBrew = original }()
+	var arguments []string
+	runBrew = func(args ...string) error {
+		arguments = args
+		return nil
+	}
+	if err := updateCmd.RunE(updateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"upgrade", "GOI17/wave/wave"}
+	if !reflect.DeepEqual(arguments, want) {
+		t.Fatalf("arguments = %#v, want %#v", arguments, want)
+	}
+}
+
+func TestUninstallRequiresConfirmation(t *testing.T) {
+	original := uninstallConfirm
+	uninstallConfirm = false
+	defer func() { uninstallConfirm = original }()
+	if err := uninstallCmd.RunE(uninstallCmd, nil); err == nil || !strings.Contains(err.Error(), "requires --confirm") {
+		t.Fatalf("error = %v, want confirmation error", err)
+	}
+}
+
+func TestConfirmedUninstallUsesHomebrewFormula(t *testing.T) {
+	originalRun := runBrew
+	originalConfirm := uninstallConfirm
+	defer func() {
+		runBrew = originalRun
+		uninstallConfirm = originalConfirm
+	}()
+	uninstallConfirm = true
+	var arguments []string
+	runBrew = func(args ...string) error {
+		arguments = args
+		return nil
+	}
+	if err := uninstallCmd.RunE(uninstallCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"uninstall", "GOI17/wave/wave"}
+	if !reflect.DeepEqual(arguments, want) {
+		t.Fatalf("arguments = %#v, want %#v", arguments, want)
 	}
 }
 
