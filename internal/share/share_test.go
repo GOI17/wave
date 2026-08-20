@@ -19,6 +19,17 @@ func TestNativeShareScriptCompiles(t *testing.T) {
 	}
 }
 
+func TestNativeShareWaitsForServiceCompletion(t *testing.T) {
+	for _, callback := range []string{"didShareItems", "didFailToShareItems", "service.delegate = self"} {
+		if !strings.Contains(script, callback) {
+			t.Fatalf("native share script is missing completion callback %q", callback)
+		}
+	}
+	if strings.Contains(script, "asyncAfter") {
+		t.Fatal("native share script still exits on a timer")
+	}
+}
+
 func TestArchiveValidatesAndSharesWaveBundle(t *testing.T) {
 	homeDir := t.TempDir()
 	path := filepath.Join(homeDir, "state.wave")

@@ -32,7 +32,7 @@ var (
 	runBrew           = runHomebrew
 	shareArchive      = share.Archive
 	// Version is overridden with release build flags.
-	Version = "1.2.2"
+	Version = "1.2.3"
 )
 
 // RootCmd is the root command

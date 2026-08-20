@@ -10,11 +10,22 @@ import (
 
 const script = `import AppKit
 
-final class ShareDelegate: NSObject, NSSharingServicePickerDelegate {
+final class ShareDelegate: NSObject, NSSharingServicePickerDelegate, NSSharingServiceDelegate {
     func sharingServicePicker(_ sharingServicePicker: NSSharingServicePicker, didChoose service: NSSharingService?) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        guard let service else {
             NSApp.stop(nil)
+            return
         }
+        service.delegate = self
+    }
+
+    func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) {
+        NSApp.stop(nil)
+    }
+
+    func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: Error) {
+        fputs("Share failed: \(error.localizedDescription)\n", stderr)
+        NSApp.stop(nil)
     }
 }
 
