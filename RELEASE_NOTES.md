@@ -1,10 +1,11 @@
-# Wave v1.3.0
+# Wave v1.3.1
 
 - Add `wave replica capture`, `apply`, and `verify` for explicitly selected documents and application bundles, preserving file contents and recorded macOS metadata.
 - Refuse conflicting destinations, unsafe paths, escaping symlinks, and corrupt snapshot payloads; support preview and idempotent reapplication.
 - Implement archive verification for files, supported preferences, system settings, and Homebrew versions/pins. Report differences and unsupported checks instead of returning a false success.
 - Capture Homebrew dependencies and casks reliably, including compatibility with older Homebrew versions.
 - Fix rollback journal state for an interrupted application installation.
+- Allow disposable executable test stubs inside the isolated Linux temporary filesystem.
 - Add isolated Linux tests and macOS migration regression coverage. Require tests before publishing and update the Intel build runner.
 
 Validation: two disposable macOS VMs restored a sample of three apps and five documents. Wave matched all eight selected items, and an independent audit matched 5,093 entries. This validates the selected sample, not a complete Mac clone; application runtime behaviour and external application data are outside this check.

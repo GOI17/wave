@@ -22,6 +22,7 @@ Isolation boundaries:
   and dependencies; build steps compile tests without executing them.
 - The build context includes only project code/build files, not `.git`, `.env`,
   personal migration archives, or transaction data.
+- `/tmp` permits execution of disposable command stubs used by the tests; it remains isolated from the host.
 - Temporary test data is deleted with the container. Docker retains the image
   and build cache on the host for subsequent runs.
 
