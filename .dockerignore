@@ -1,0 +1,16 @@
+# Allow only project sources required by the two Dockerfiles into build contexts.
+**
+!go.mod
+!go.sum
+!Makefile
+!wave_test.go
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!ui/
+!ui/**
+!scripts/
+!scripts/**
+!Dockerfile
+!Dockerfile.test

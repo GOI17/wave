@@ -12,7 +12,7 @@ import (
 )
 
 func TestAnalyzerDevice(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	a := analyzer.NewMacOSAnalyzer(homeDir)
 
 	state, err := a.AnalyzeDevice()
@@ -43,7 +43,7 @@ func TestAnalyzerDevice(t *testing.T) {
 }
 
 func TestAnalyzerApplications(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	a := analyzer.NewMacOSAnalyzer(homeDir)
 
 	apps, err := a.AnalyzeApplications()
@@ -62,7 +62,7 @@ func TestAnalyzerApplications(t *testing.T) {
 }
 
 func TestAnalyzerDotfiles(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	a := analyzer.NewMacOSAnalyzer(homeDir)
 
 	dotfiles, err := a.AnalyzeDotfiles()
@@ -87,7 +87,7 @@ func TestAnalyzerDotfiles(t *testing.T) {
 }
 
 func TestAnalyzerPreferences(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	a := analyzer.NewMacOSAnalyzer(homeDir)
 
 	prefs, err := a.AnalyzePreferences()
@@ -106,7 +106,7 @@ func TestAnalyzerPreferences(t *testing.T) {
 }
 
 func TestAnalyzerEnvironment(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	a := analyzer.NewMacOSAnalyzer(homeDir)
 
 	env, err := a.AnalyzeEnvironment()
@@ -130,7 +130,7 @@ func TestAnalyzerEnvironment(t *testing.T) {
 }
 
 func TestMigrationCapture(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	tempFile := filepath.Join(homeDir, "wave-test-capture.yaml")
 	defer os.Remove(tempFile)
 
@@ -157,7 +157,7 @@ func TestMigrationCapture(t *testing.T) {
 }
 
 func TestMigrationApplyDryRun(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	tempFile := filepath.Join(homeDir, "wave-test-apply.yaml")
 	defer os.Remove(tempFile)
 
@@ -182,7 +182,7 @@ func TestMigrationApplyDryRun(t *testing.T) {
 }
 
 func TestExecutorValidation(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	e := executor.NewMacOSExecutor(homeDir, true)
 
 	// Nil state
@@ -245,7 +245,7 @@ func TestDataModelSerialization(t *testing.T) {
 }
 
 func TestFilePathHandling(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := t.TempDir()
 	testPath := filepath.Join(homeDir, ".config", "wave", "test.yaml")
 
 	dir := filepath.Dir(testPath)
@@ -270,7 +270,7 @@ func TestFilePathHandling(t *testing.T) {
 }
 
 func BenchmarkCapture(b *testing.B) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := b.TempDir()
 	tempFile := filepath.Join(homeDir, "wave-bench-capture.yaml")
 	defer os.Remove(tempFile)
 
@@ -285,7 +285,7 @@ func BenchmarkCapture(b *testing.B) {
 }
 
 func BenchmarkAnalyzeDevice(b *testing.B) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := b.TempDir()
 	a := analyzer.NewMacOSAnalyzer(homeDir)
 
 	b.ResetTimer()

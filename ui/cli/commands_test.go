@@ -111,3 +111,15 @@ func TestRollbackRequiresConfirmation(t *testing.T) {
 		t.Fatalf("error = %v, want confirmation error", err)
 	}
 }
+
+func TestVerifyRequiresInputAndDiffDoesNotPretendSuccess(t *testing.T) {
+	previous := inputPath
+	inputPath = ""
+	defer func() { inputPath = previous }()
+	if err := verifyCmd.RunE(verifyCmd, nil); err == nil {
+		t.Fatal("verify without an archive reported success")
+	}
+	if err := diffCmd.RunE(diffCmd, nil); err == nil {
+		t.Fatal("unimplemented diff reported success")
+	}
+}

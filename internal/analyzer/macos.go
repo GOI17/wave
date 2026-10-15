@@ -2,7 +2,6 @@ package analyzer
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -68,11 +67,17 @@ func (a *macOSAnalyzer) AnalyzeApplications() (*models.ApplicationGroup, error) 
 	}
 
 	// Capture Homebrew formulas
-	formulas, _ := a.getHomebrewFormulas()
+	formulas, err := a.getHomebrewFormulas()
+	if err != nil {
+		return nil, err
+	}
 	apps.Homebrew = append(apps.Homebrew, formulas...)
 
 	// Capture Homebrew casks
-	casks, _ := a.getHomebrewCasks()
+	casks, err := a.getHomebrewCasks()
+	if err != nil {
+		return nil, err
+	}
 	apps.Homebrew = append(apps.Homebrew, casks...)
 
 	// Capture VS Code extensions
@@ -235,39 +240,11 @@ func (a *macOSAnalyzer) getFullName(username string) string {
 }
 
 func (a *macOSAnalyzer) getHomebrewFormulas() ([]models.HomebrewPackage, error) {
-	cmd := exec.Command("brew", "leaves")
-	output, err := cmd.Output()
-	if err != nil {
-		return []models.HomebrewPackage{}, nil
-	}
-	packages := []models.HomebrewPackage{}
-	for _, name := range strings.Fields(string(output)) {
-		version, _ := a.execCommand("brew", "list", "--versions", name)
-		packages = append(packages, models.HomebrewPackage{
-			Name:    name,
-			Type:    "formula",
-			Version: version,
-		})
-	}
-	return packages, nil
+	return captureHomebrew("formula")
 }
 
 func (a *macOSAnalyzer) getHomebrewCasks() ([]models.HomebrewPackage, error) {
-	cmd := exec.Command("bash", "-c", "brew list --casks --json 2>/dev/null || echo '[]'")
-	output, _ := cmd.Output()
-
-	var result []map[string]interface{}
-	json.Unmarshal(output, &result)
-
-	packages := []models.HomebrewPackage{}
-	for _, pkg := range result {
-		packages = append(packages, models.HomebrewPackage{
-			Name:    a.asString(pkg["name"]),
-			Type:    "cask",
-			Version: a.asString(pkg["version"]),
-		})
-	}
-	return packages, nil
+	return captureHomebrew("cask")
 }
 
 func (a *macOSAnalyzer) getVSCodeExtensions() ([]string, error) {

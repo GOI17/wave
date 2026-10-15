@@ -620,7 +620,7 @@ func rollbackJournal(journal *Journal, homeDir, dir string, system System) (*Rol
 			if installed {
 				record.Applied, record.Applying = true, false
 			} else {
-				record.RolledBack = true
+				record.Applying, record.RolledBack = false, true
 				if err := saveJournal(dir, journal); err != nil {
 					return result, err
 				}

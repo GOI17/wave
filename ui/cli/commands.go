@@ -32,7 +32,7 @@ var (
 	runBrew           = runHomebrew
 	shareArchive      = share.Archive
 	// Version is overridden with release build flags.
-	Version = "1.2.3"
+	Version = "1.3.0"
 )
 
 // RootCmd is the root command
@@ -228,8 +228,21 @@ var verifyCmd = &cobra.Command{
 	Short: "Verify migration",
 	Long:  `Verify that a migration was applied successfully.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("✅ Verification not yet implemented")
-		fmt.Println("This will compare current state against captured state")
+		if inputPath == "" {
+			return fmt.Errorf("verify requires --input with a .wave archive")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		result, err := transaction.Verify(inputPath, home)
+		if err != nil {
+			return err
+		}
+		fmt.Print(transaction.FormatVerification(result))
+		if !result.Complete() {
+			return fmt.Errorf("verification incomplete: differences or unverified items remain")
+		}
 		return nil
 	},
 }
@@ -240,8 +253,7 @@ var diffCmd = &cobra.Command{
 	Short: "Show differences",
 	Long:  `Compare two migration states and show differences.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("📊 Diff not yet implemented")
-		return nil
+		return fmt.Errorf("diff is not implemented; use verify --input FILE to check captured items on this machine")
 	},
 }
 

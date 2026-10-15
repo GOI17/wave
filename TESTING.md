@@ -1,507 +1,154 @@
-# Wave v1.0.0 Testing Guide
+# Isolated migration testing
 
-Complete testing procedures and environment setup for all three interfaces (CLI, TUI, GUI).
+## Everyday development: disposable container
 
----
+Start Docker Desktop, then run from the repository:
 
-## Prerequisites
-
-### Required
-- macOS 10.14 or later (for testing; can use Docker)
-- Go 1.23+ (for building)
-- Homebrew (for app testing)
-
-### Optional
-- Docker (for isolated testing)
-- FFmpeg (for video recording)
-- scrot/screenshot tools (for screenshots)
-
----
-
-## Test Environment Setup
-
-### Option 1: Docker Container (Recommended for Clean Tests)
-
-```bash
-# Build test image
-docker build -t wave-test -f Dockerfile .
-
-# Run interactive container
-docker run -it --name wave-test wave-test /bin/bash
-
-# Inside container
-cd /app
-make build
+```sh
+make test-sandbox
 ```
 
-### Option 2: Local Machine
+The command builds `Dockerfile.test`, compiles the portable analyzer, archive, and executor suites with race
+instrumentation, and executes them in a disposable Linux container. A failed
+suite makes the command and CI job fail. If Docker is unavailable, the command
+stops; it never falls back to running tests on your laptop.
 
-```bash
-# Install dependencies
-brew install go
+Isolation boundaries:
 
-# Navigate to project
-cd wave
+- No host directory, Docker socket, SSH agent, or credential mounts.
+- The container runs as a non-root user with all Linux capabilities dropped.
+- Its root filesystem is read-only; only temporary directories are writable.
+- Test execution has no network. Building the image needs network access for Go
+  and dependencies; build steps compile tests without executing them.
+- The build context includes only project code/build files, not `.git`, `.env`,
+  personal migration archives, or transaction data.
+- Temporary test data is deleted with the container. Docker retains the image
+  and build cache on the host for subsequent runs.
 
-# Build
-make build
+The full transaction suite uses macOS-specific atomic file operations
+(`renameatx_np`). It runs on a GitHub-hosted macOS runner, not in this Linux
+container. To run only the new migration scenarios **inside a disposable macOS
+VM**:
 
-# Verify
-./wave --version
+```sh
+go test -race ./internal/transaction -run TestSandbox -v
 ```
 
----
-
-## Test Scenarios
-
-### Scenario 1: CLI Interface Testing
-
-**Goal:** Verify CLI capture and apply commands work correctly
-
-#### Test 1.1: Capture Command
-
-```bash
-# Command
-./wave capture --output test-capture.yaml --format yaml
-
-# Expected Output
-# ✅ Should create test-capture.yaml
-# ✅ Should contain device info, apps, dotfiles, prefs
-# ✅ No errors
-
-# Verification
-ls -lah test-capture.yaml
-head -30 test-capture.yaml
-```
-
-**Screenshots to capture:**
-1. `cli-capture-command.png` - Command execution
-2. `cli-capture-output.png` - Success output
-3. `cli-capture-file.png` - Generated YAML file
-
-#### Test 1.2: Apply Command (Dry-run)
-
-```bash
-# Command
-./wave apply --input test-capture.yaml --dry-run
-
-# Expected Output
-# ✅ Should show "DRY-RUN: Would..." messages
-# ✅ Should NOT apply changes
-# ✅ Success completion message
-
-# Verification
-./wave apply --input test-capture.yaml --dry-run 2>&1 | grep -i "dry-run"
-```
-
-**Screenshots to capture:**
-1. `cli-apply-dryrun-command.png` - Command execution
-2. `cli-apply-dryrun-output.png` - Dry-run output showing what would happen
-3. `cli-apply-dryrun-summary.png` - Final summary
-
-#### Test 1.3: Help Commands
-
-```bash
-# Main help
-./wave --help
-
-# Specific command help
-./wave capture --help
-./wave apply --help
-./wave tui --help
-```
-
-**Screenshots to capture:**
-1. `cli-help-main.png` - Main help output
-2. `cli-help-capture.png` - Capture help
-3. `cli-help-apply.png` - Apply help
-
-#### Test 1.4: Version Command
-
-```bash
-./wave version
-```
-
-**Screenshots to capture:**
-1. `cli-version.png` - Version output
-
----
-
-### Scenario 2: TUI Interface Testing
-
-**Goal:** Verify terminal UI navigation and functionality
-
-#### Test 2.1: TUI Launch
-
-```bash
-# Command
-./wave tui
-
-# Expected Output
-# ✅ Should launch interactive TUI
-# ✅ Show menu with options
-# ✅ Arrow keys/j/k for navigation
-# ✅ Enter to select
-# ✅ 'q' to quit
-```
-
-**Recording to capture:**
-- `tui-demo.mp4` (30-60 seconds)
-  - Show menu navigation
-  - Select "Capture Device State"
-  - Show capture in progress
-  - Return to menu
-  - Select "Exit"
-
-**Screenshots to capture:**
-1. `tui-menu.png` - Main menu
-2. `tui-navigation.png` - Menu navigation (cursor movement)
-3. `tui-capture-option.png` - Capture option selected
-4. `tui-exit.png` - Clean exit
-
----
-
-### Scenario 3: GUI Interface Testing
-
-**Goal:** Verify web-based GUI functionality
-
-#### Test 3.1: GUI Launch
-
-```bash
-# Command
-./wave gui --port 8080
-
-# Expected Output
-# ✅ Server should start on localhost:8080
-# ✅ Web UI should be accessible
-```
-
-**Action:**
-1. Open browser: http://localhost:8080
-2. Verify web interface loads
-3. Check tabs load correctly
-
-**Screenshots to capture:**
-1. `gui-homepage.png` - Initial page load
-2. `gui-header.png` - Wave header/branding
-3. `gui-capture-tab.png` - Capture tab
-4. `gui-apply-tab.png` - Apply tab
-5. `gui-info-tab.png` - Info tab
-
-#### Test 3.2: Capture via GUI
-
-```
-Steps:
-1. Open http://localhost:8080
-2. Ensure on "Capture" tab
-3. Click "Start Capture" button
-4. Wait for success message
-5. Verify file created
-```
-
-**Recording to capture:**
-- `gui-capture-demo.mp4` (45-60 seconds)
-  - Show clicking button
-  - Show loading state
-  - Show success message
-  - Show file confirmation
-
-**Screenshots to capture:**
-1. `gui-capture-start.png` - Before capture
-2. `gui-capture-loading.png` - Loading spinner
-3. `gui-capture-success.png` - Success message with file path
-
-#### Test 3.3: Apply via GUI
-
-```
-Steps:
-1. Open http://localhost:8080
-2. Click "Apply" tab
-3. Select a state file
-4. Check "Dry-run" checkbox
-5. Click "Apply Migration"
-6. Verify dry-run output
-```
-
-**Recording to capture:**
-- `gui-apply-demo.mp4` (45-60 seconds)
-  - Show file selection
-  - Show dry-run checkbox
-  - Show applying
-  - Show results
-
-**Screenshots to capture:**
-1. `gui-apply-file-select.png` - File input
-2. `gui-apply-dryrun-check.png` - Dry-run checkbox
-3. `gui-apply-loading.png` - Loading state
-4. `gui-apply-success.png` - Success result
-
-#### Test 3.4: Navigation
-
-```
-Steps:
-1. Click each tab: Capture, Apply, Info
-2. Verify content switches correctly
-3. Verify styling and layout
-```
-
-**Screenshots to capture:**
-1. `gui-tab-capture.png` - Capture tab
-2. `gui-tab-apply.png` - Apply tab
-3. `gui-tab-info.png` - Info tab
-
----
-
-## Integration Tests
-
-### Test Suite 1: Data Integrity
-
-```bash
-# Capture state
-./wave capture --output state1.yaml
-
-# Apply (dry-run)
-./wave apply --input state1.yaml --dry-run
-
-# Verify YAML is valid
-cat state1.yaml | grep -E "version|created_at|device_info"
-```
-
-### Test Suite 2: Format Conversion
-
-```bash
-# Capture as YAML
-./wave capture --output state.yaml --format yaml
-
-# Capture as JSON
-./wave capture --output state.json --format json
-
-# Verify both files exist and are valid
-file state.yaml state.json
-```
-
-### Test Suite 3: Error Handling
-
-```bash
-# Try to apply non-existent file
-./wave apply --input /nonexistent/file.yaml 2>&1 | grep -i error
-
-# Try invalid format
-./wave capture --format invalid 2>&1 | grep -i error
-
-# Try bad permissions
-sudo chmod 000 /tmp/test.yaml
-./wave apply --input /tmp/test.yaml 2>&1 | grep -i "permission\|denied"
-```
-
----
-
-## Performance Testing
-
-### Capture Performance
-
-```bash
-# Measure capture time
-time ./wave capture --output state.yaml
-
-# Expected: < 5 seconds for full capture
-```
-
-### File Size Analysis
-
-```bash
-# Check state file size
-ls -lah state.yaml
-
-# Expected: 50KB - 500KB depending on system
-```
-
----
-
-## Browser Compatibility Testing (GUI)
-
-Test GUI in different browsers:
-
-- Chrome/Chromium ✓
-- Firefox ✓
-- Safari ✓
-- Edge ✓
-
-**Test in each browser:**
-1. Load http://localhost:8080
-2. Test all tabs
-3. Test buttons and interactions
-4. Check responsive design (mobile)
-
-**Screenshots per browser:**
-1. `gui-chrome.png`
-2. `gui-firefox.png`
-3. `gui-safari.png`
-
----
-
-## Recording Instructions
-
-### For Videos (TUI & GUI)
-
-#### Using QuickTime (macOS)
-```
-1. Open QuickTime Player
-2. File → New Screen Recording
-3. Select area/full screen
-4. Click Record
-5. Perform test actions
-6. Stop recording
-7. Save as .mp4
-```
-
-#### Using FFmpeg
-```bash
-# Start screen recording
-ffmpeg -f avfoundation -i "1" -t 60 output.mp4
-
-# For audio+video
-ffmpeg -f avfoundation -i "1:0" -t 60 output.mp4
-```
-
-### For Screenshots
-
-#### Using macOS Screenshot Tool
-```bash
-# Full screen
-screenshot -x full_screenshot.png
-
-# Region
-screenshot -x region_screenshot.png
-
-# Window
-screenshot -x window_screenshot.png
-```
-
-#### Using Command Line
-```bash
-# Full screenshot
-screencapture -x screenshot.png
-
-# Timed (5 second delay)
-screencapture -x -T 5 delayed_screenshot.png
-```
-
----
-
-## Test Results Documentation
-
-### Template for Results
-
-Create file: `TEST_RESULTS_v1.0.0.md`
-
-```markdown
-# Wave v1.0.0 Test Results
-
-**Date:** [Date]
-**Tester:** [Name]
-**Environment:** [macOS version, Go version, etc.]
-
-## CLI Tests
-
-### Capture Command
-- [x] Basic capture works
-- [x] Output file created
-- [x] YAML format valid
-- [x] Contains all expected fields
-- **Status:** ✅ PASS
-
-### Apply Command (Dry-run)
-- [x] Accepts state file
-- [x] Shows dry-run messages
-- [x] No changes applied
-- [x] Completes successfully
-- **Status:** ✅ PASS
-
-## TUI Tests
-
-### Menu Navigation
-- [x] Launches successfully
-- [x] Menu displays correctly
-- [x] Arrow keys work
-- [x] Enter selects options
-- [x] 'q' quits cleanly
-- **Status:** ✅ PASS
-
-## GUI Tests
-
-### Web Interface
-- [x] Server starts on port 8080
-- [x] Page loads in browser
-- [x] All tabs functional
-- [x] Responsive design works
-- [x] Capture button works
-- **Status:** ✅ PASS
-
-## Overall Status
-🎉 **All Tests PASSED** - Ready for v1.0.0 Release
-```
-
----
-
-## CI/CD Integration
-
-### GitHub Actions Example
-
-```yaml
-name: Wave Tests
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v2
-        with:
-          go-version: 1.23
-      - run: make build
-      - run: make test
-      - run: ./wave --version
-```
-
----
-
-## Test Checklist
-
-- [ ] CLI capture command works
-- [ ] CLI apply dry-run works
-- [ ] CLI help commands display correctly
-- [ ] TUI launches and navigates
-- [ ] TUI menu options are selectable
-- [ ] GUI starts server on correct port
-- [ ] GUI web interface loads
-- [ ] GUI capture functionality works
-- [ ] GUI apply functionality works
-- [ ] All tabs render correctly
-- [ ] All error cases handled gracefully
-- [ ] Performance is acceptable
-- [ ] Output files are valid
-- [ ] Cross-browser compatibility (GUI)
-- [ ] Responsive design works (GUI)
-
----
-
-## Known Issues
-
-(To be updated after testing)
-
----
-
-## Approved for Release
-
-- [ ] All tests passed
-- [ ] Documentation complete
-- [ ] Code reviewed
-- [ ] Performance acceptable
-- [ ] Security verified
-
-**Date:** ___________
-**Tester:** ___________
-**Approver:** ___________
+`make test`, `make test-race`, and direct `go test` still run natively. Prefer
+those inside a disposable macOS VM or a GitHub-hosted macOS runner. Tests use
+temporary file paths, but some analyzer smoke tests still query the OS and its
+installed applications. A temporary `HOME` alone does not isolate Homebrew,
+`/Applications`, `defaults`, `scutil`, or system-wide changes.
+
+## What the automated tests prove
+
+`internal/transaction/sandbox_test.go` creates separate synthetic source and
+target machines. It uses the real dotfile analyzer, `.wave` archive code, and
+transaction engine, with an in-memory application manager that never launches
+Homebrew, `mas`, or macOS settings commands.
+
+| Scenario | Assertions |
+| --- | --- |
+| Capture, archive, preview, apply | Target bytes and permissions match the source; source is unchanged; preview creates no target transaction |
+| Formula and cask migration | Correct install commands; an existing formula with the same name does not suppress a cask |
+| App Store migration | The captured numeric ID is passed to `mas install` |
+| Rollback | Original bytes/permissions restored; newly created files removed; installed apps retained as specified by Wave |
+| Reapply after rollback | Already installed apps are not installed again |
+| Installation failure | Error is returned; the partial transaction can restore files without uninstalling apps |
+
+The existing suites also exercise symlinks, hard links, checksums, corrupted
+archives/journals, interrupted transactions, post-apply edits, preference
+restoration, and CLI/TUI/GUI handlers. The AppKit/Swift compilation test runs
+in the macOS CI job; it is not part of the portable container suite.
+
+These are integration tests of Wave's migration engine. They do not prove that
+Apple or Homebrew can download an application, or that real macOS settings were
+applied. The CLI/TUI/GUI handler tests are not interactive desktop acceptance tests.
+
+`.github/workflows/test-sandbox.yml` runs the portable container suite and the
+full native suite on a GitHub-hosted macOS runner on pushes to `main` and pull
+requests, without Apple credentials or a self-hosted runner. The sandbox
+workflow does not currently gate release publication; configure required checks
+before treating it as a release gate.
+
+## Real migration acceptance: disposable macOS machines
+
+Use a macOS VM for actual formula/cask installations, macOS preferences, and
+interactive UI checks. Docker Desktop runs Linux containers and cannot validate
+those macOS integrations. On Apple Silicon, [Tart](https://tart.run/quick-start/)
+is one option for creating and cloning disposable macOS VMs.
+
+1. Prepare a clean macOS VM with a test user, Go, Homebrew, `mas`, and a copy of
+   the Wave revision under test. Keep personal dotfiles and iCloud data out of it.
+2. Shut down and preserve that clean VM as the baseline. Create independent
+   source and destination clones. Do not attach host home folders or writable
+   host shares. Copy project code and `.wave` fixtures into the guests.
+3. Inside the **source VM**, create synthetic dotfiles and install a small known
+   set of formulas, casks, and an App Store app available to the test account.
+   Record the expected bytes, modes, inventory IDs, and preferences independently
+   of Wave's own output, then capture a `.wave` archive.
+4. Inside the **destination VM**, start with a different `.vimrc` and one
+   preinstalled package. Record its original state, preview the archive, and
+   assert that preview left files, inventory, preferences, and transactions
+   unchanged. Then execute the confirmed Apply inside that guest.
+5. Verify files byte-for-byte and by permissions. Compare the expected inventory
+   with `brew list --formula`, `brew list --cask`, and `mas list`. Read back each
+   expected preference with `defaults read`; launch the migrated applications.
+   Run `wave verify --input source.wave` as an additional check: it reads actual
+   files, Homebrew versions, and supported preferences, and fails on differences
+   or unverified items. Keep the independent comparison: an archive omits
+   documents, application data, ACLs, and extended attributes, so verification
+   cannot certify a whole-Mac replica. `wave diff` is unimplemented and fails.
+6. Run Rollback inside the destination guest. Check the original files and
+   preferences are restored and apps are retained/reported. In a separate run,
+   edit a migrated file before rollback and verify that Wave reports a conflict
+   and preserves the edit.
+7. Preserve the logs and expected/actual comparison, discard the test clones,
+   and create fresh clones from the baseline for the next run. Resetting the VM,
+   rather than Wave's rollback, removes installed apps and resets the full OS.
+
+App Store testing is a separate, interactive acceptance step: confirm that the
+chosen VM configuration supports App Store sign-in and that `mas list` and an
+installation work with the test account before testing Wave. Account access,
+application availability, Spotlight indexing, and VM identity can affect the
+result. Do not put Apple credentials in CI or assume a cloned VM retains working
+authentication. See [mas requirements](https://github.com/mas-cli/mas) and
+[Apple's VM account documentation](https://developer.apple.com/documentation/virtualization/using-icloud-with-macos-virtual-machines).
+
+A second user account on your personal Mac is insufficient isolation: Homebrew,
+applications in `/Applications`, and system settings may be shared. Reserve
+confirmed real migrations for disposable guest machines.
+
+## Selected application/document replica acceptance
+
+Use `wave replica` when the fixture includes actual documents and `.app` bundle
+contents. Create the destination VM from the clean baseline before populating
+the source. Populate only the source using an independent copy tool. Record an
+independent SHA-256 inventory, file modes, and symlink targets before capture.
+Keep personal fixtures, snapshots, inventories, and VM credentials outside Git.
+
+Inside the source guest, run `wave replica capture --output ~/sample-replica`
+with repeated `--document Documents/example.pdf` and
+`--application Example.app` selections. Transport the entire snapshot with the
+metadata-preserving tar commands in README into a fresh destination directory.
+Do not mount the host home or enable guest Internet access for personal fixtures.
+
+Inside the destination guest:
+
+1. Confirm the selected items are absent independently of Wave.
+2. Run `wave replica apply --input ~/sample-replica --dry-run` and compare the
+   destination again to prove preview did not write any selected item.
+3. Run `wave replica apply --input ~/sample-replica --confirm`.
+4. Run `wave replica verify --input ~/sample-replica`. It must return zero and
+   report no differences in the captured content and metadata.
+5. Compare the restored files against the independent original inventory.
+6. Reapply and verify that no identical item is rewritten. Regression tests
+   separately verify that changed documents cause conflicts and remain intact.
+7. Compare application code-signature checks with the source. An existing
+   source signature failure must be reported separately from transfer damage.
+
+The macOS-only `internal/replica` suite exercises native copying, app-framework
+symlinks, hard links, ACLs, extended attributes, metadata-preserving transport,
+payload corruption, path traversal, symlink escapes, conflicts, and exclusive
+publication. A passing sample establishes fidelity for that selection, not for
+all documents, application support data, accounts, or the complete system.

@@ -18,8 +18,10 @@ and local web interfaces for reviewing migration plans.
 | Navigate capture and preview workflows in TUI | Available |
 | Capture and preview through a local web GUI | Available |
 | Restore vetted root dotfiles from a `.wave` archive | Available with confirmation |
+| Restore explicitly selected documents and `.app` bundles | Available through `wave replica` directory snapshots |
 | Conflict-safe rollback | Available for applied root dotfiles |
-| Verification and state diff | Placeholders only |
+| Verify captured files, Homebrew versions, and supported preferences | Available; reports differences and unverified items |
+| State diff | Not implemented; returns an error |
 
 Wave currently inventories applications, selected dotfile paths, macOS
 preferences, and shell environment metadata. It does not replace a backup tool.
@@ -99,6 +101,47 @@ wave apply --input wave-state.wave --confirm
 wave rollback --confirm
 ```
 
+## Selected documents and application bundles (macOS)
+
+For an explicit sample of personal documents and self-contained applications,
+use a directory snapshot. This mode is separate from the conservative `.wave`
+archive and does not reinstall applications through package managers:
+
+```sh
+wave replica capture --output ~/sample-replica \
+  --document 'Documents/example.pdf' \
+  --application 'Example.app'
+# Transfer the entire private sample-replica directory to the destination.
+wave replica apply --input ~/sample-replica --dry-run
+wave replica apply --input ~/sample-replica --confirm
+wave replica verify --input ~/sample-replica
+```
+
+Repeat `--document` and `--application` for additional items. Documents are
+relative to the current home; application names refer to `/Applications`.
+Transport the directory with metadata intact. For example, on macOS use
+`tar --format=pax --acls --xattrs --fflags -cpf sample.tar sample-replica` and extract with
+`tar --same-owner --mac-metadata --acls --xattrs --fflags -xpf sample.tar` into a
+fresh directory. The receiving account
+must be able to preserve the captured owner and groups. A plain file upload or
+an extraction that changes ownership will correctly fail integrity validation.
+Use full PAX format: the default restricted PAX format can truncate directory
+timestamps when no other extended metadata forces a PAX header.
+Capture preserves native metadata and records SHA-256 hashes, modes, ownership,
+timestamps, flags, ACLs, extended attributes, internal symlinks and hard links.
+Capture fails if the selected source changes or the copy loses recorded metadata.
+Apply verifies every payload before writing, rejects different existing items,
+and publishes each copied item without replacement. Reapplying identical items
+is a no-op. Preview and verification do not write destination data.
+
+This is a selected-item migration, not a complete system backup. Application
+support data, accounts, licensing, system extensions and external dependencies
+are not included automatically. Source and target must support the recorded
+ownership and metadata. External symlinks and special files are rejected.
+Apply is atomic per selected item, not across the full selection; if a later
+item fails, earlier verified items remain. The dotfile `rollback` command does
+not roll back replica items. Use disposable VMs for acceptance testing.
+
 ## TUI
 
 ```bash
@@ -143,13 +186,22 @@ wave update
 wave uninstall --confirm
 wave tui
 wave gui [--port 8080]
-wave verify --input FILE  # placeholder
-wave diff                 # placeholder
+wave verify --input FILE  # Read-only; fails on differences or unverified items
+wave diff                 # Not implemented; returns an error
 wave version
 wave --help
 ```
 
 ## Safety Limits
+
+- `verify` checks the items represented in an archive. It does not certify a
+  complete Mac clone: documents, application data, ACLs, and extended attributes
+  are outside this archive format. Excluded files, manual apps, and unsupported
+  checks are reported as unverified and cause a nonzero exit status.
+- Homebrew capture includes installed dependencies and versions. Inventory
+  failures abort capture instead of silently producing an empty package list.
+  Apply still installs by name and does not pin the source versions; `verify`
+  reports any resulting version differences.
 
 - Immediate root dotfiles that pass strict safety checks are bundled and applied.
   Homebrew packages, VS Code extensions, App Store apps available through `mas`,
@@ -168,14 +220,27 @@ wave --help
 
 ## Development
 
+For local migration testing, use a disposable container with no host mounts:
+
+```bash
+make test-sandbox
+```
+
+This runs portable analyzer, archive, and file executor tests. The full
+transaction/rollback suite runs on disposable macOS CI with simulated application
+managers. Real Homebrew, App Store, and macOS preferences require a macOS VM.
+See [TESTING.md](TESTING.md) for the isolation boundaries and VM acceptance steps.
+
+On a disposable macOS VM or hosted CI runner:
+
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
 ```
 
-Run tests with an isolated `HOME` when exercising capture or migration behavior
-so tests cannot inspect or modify a real user profile.
+Changing `HOME` alone does not isolate Homebrew, `/Applications`, or macOS
+preferences. Do not use it as a sandbox for a real Apply.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for contributor commands and
 [ARCHITECTURE.md](ARCHITECTURE.md) for the current design.

@@ -1,6 +1,6 @@
-.PHONY: help build clean test run capture apply tidy fmt lint install release docker version
+.PHONY: help build clean test test-sandbox run capture apply tidy fmt lint install release docker version
 
-VERSION=1.2.3
+VERSION=1.3.0
 BINARY=wave
 BUILD_DIR=build
 
@@ -21,6 +21,7 @@ help:
 	@echo "  make apply-dry    - Test apply (dry-run)"
 	@echo ""
 	@echo "Testing:"
+	@echo "  make test-sandbox - Run tests in a disposable container (recommended locally)"
 	@echo "  make test         - Run all tests"
 	@echo "  make test-race    - Run tests with race detection"
 	@echo "  make test-verbose - Run tests with verbose output"
@@ -78,6 +79,9 @@ clean:
 	rm -f coverage.out coverage.html
 	go clean
 	@echo "✓ Clean complete"
+
+test-sandbox:
+	sh scripts/test-sandbox.sh
 
 test:
 	@echo "🧪 Running tests..."

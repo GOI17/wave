@@ -1,0 +1,23 @@
+FROM golang:1.23-bookworm
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY ui/ ./ui/
+COPY wave_test.go ./
+
+# Only portable packages: transaction/CLI/UI depend on macOS renameatx_np.
+# Compile ahead of time. Test execution happens only in the restricted container.
+RUN mkdir /tests \
+    && go list -f '{{.ImportPath}}' ./internal/analyzer ./internal/bundle ./internal/executor > /tmp/test-packages \
+    && while IFS= read -r package; do \
+        suite=$(printf '%s' "$package" | tr / _); \
+        go test -race -c -o "/tests/$suite.test" "$package" || exit 1; \
+    done < /tmp/test-packages
+RUN useradd --uid 10001 --create-home wave
+COPY scripts/run-sandbox-tests.sh /usr/local/bin/run-sandbox-tests
+USER 10001:10001
+ENV HOME=/home/wave TMPDIR=/tmp
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/run-sandbox-tests"]

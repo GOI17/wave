@@ -1,0 +1,33 @@
+name: Isolated migration tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run disposable migration tests
+        run: make test-sandbox
+
+  macos:
+    # Hosted runner only: never use the developer's Mac as a self-hosted runner.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+      - name: Run full migration suite on disposable macOS
+        run: go test -race -count=1 ./...
+      - name: Vet
+        run: go vet ./...

@@ -326,6 +326,8 @@ type fakePreference struct {
 }
 
 type fakeSystem struct {
+	calls       []string
+	failCommand string
 	preferences map[string]fakePreference
 	packages    map[string]string
 	extensions  map[string]bool
@@ -353,9 +355,15 @@ func (s *fakeSystem) Output(name string, args ...string) (string, error) {
 		}
 		return value.value, nil
 	case "brew":
+		if len(args) != 2 || args[0] != "list" || (args[1] != "--formula" && args[1] != "--cask") {
+			return "", fmt.Errorf("unexpected brew query: %v", args)
+		}
 		var installed []string
-		for name := range s.packages {
-			installed = append(installed, name)
+		prefix := strings.TrimPrefix(args[1], "--") + ":"
+		for key := range s.packages {
+			if strings.HasPrefix(key, prefix) {
+				installed = append(installed, strings.TrimPrefix(key, prefix))
+			}
 		}
 		return strings.Join(installed, "\n"), nil
 	case "code":
@@ -386,6 +394,11 @@ func (s *fakeSystem) Output(name string, args ...string) (string, error) {
 }
 
 func (s *fakeSystem) Run(name string, args ...string) error {
+	command := name + " " + strings.Join(args, " ")
+	s.calls = append(s.calls, command)
+	if command == s.failCommand {
+		return fmt.Errorf("simulated installation failure")
+	}
 	switch name {
 	case "defaults":
 		if args[0] == "delete" {
@@ -399,11 +412,14 @@ func (s *fakeSystem) Run(name string, args ...string) error {
 		s.preferences[args[1]+":"+args[2]] = fakePreference{kind: strings.TrimPrefix(args[3], "-"), value: args[4]}
 	case "brew":
 		name := args[len(args)-1]
-		if args[0] == "install" {
-			s.packages[name] = name + " 1.0"
-		} else {
-			delete(s.packages, name)
+		kind := "formula"
+		if len(args) == 3 && args[1] == "--cask" {
+			kind = "cask"
 		}
+		if args[0] != "install" || (len(args) != 2 && !(len(args) == 3 && (args[1] == "--cask" || args[1] == "--formula"))) {
+			return fmt.Errorf("unexpected brew mutation: %v", args)
+		}
+		s.packages[kind+":"+name] = name + " 1.0"
 	case "code":
 		s.extensions[args[1]] = args[0] == "--install-extension"
 	case "mas":
